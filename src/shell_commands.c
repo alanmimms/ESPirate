@@ -51,6 +51,9 @@ static int cmd_echo(const struct shell *sh, size_t argc, char **argv)
     return 0;
 }
 
+#include "fs_manager.h"
+#include "lua_worker.h"
+
 static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 {
     ARG_UNUSED(argc);
@@ -61,8 +64,31 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
     shell_print(sh, "  [*] Phase 2: Dynamic GPIO    - ACTIVE");
     shell_print(sh, "  [*] Phase 2: Lua Engine      - ACTIVE (%u KB used)",
                 (unsigned int)lua_manager_get_memory_kb());
-    shell_print(sh, "  [ ] Phase 3: LittleFS        - NOT MOUNTED");
-    shell_print(sh, "  [ ] Phase 3: Wi-Fi AP & Web  - NOT STARTED");
+    shell_print(sh, "  [*] Phase 3: LittleFS        - %s (/lfs)",
+                fs_manager_is_mounted() ? "MOUNTED" : "NOT MOUNTED");
+    shell_print(sh, "  [*] Phase 3: Lua Worker      - ACTIVE (%s)",
+                lua_worker_is_busy() ? "BUSY" : "IDLE");
+    shell_print(sh, "  [ ] Phase 4: Wi-Fi AP & Web  - NOT STARTED");
+    return 0;
+}
+
+static int cmd_telemetry(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    espirate_telemetry_t t;
+    int ret = espirate_telemetry_get(&t);
+    if (ret != 0) {
+        shell_error(sh, "Failed to read telemetry: %d", ret);
+        return ret;
+    }
+
+    shell_print(sh, "=== ESPirate Telemetry ===");
+    shell_print(sh, "  Total Cycles  : %u", t.total_cycles);
+    shell_print(sh, "  Passed Cycles : %u", t.passed_cycles);
+    shell_print(sh, "  Failed Cycles : %u", t.failed_cycles);
+    shell_print(sh, "  Last Status   : %s", t.last_status);
     return 0;
 }
 
@@ -71,6 +97,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_espirate,
     SHELL_CMD(info, NULL, "Show system & hardware info: espirate info", cmd_info),
     SHELL_CMD(ping, NULL, "Ping-pong test: espirate ping [arg]", cmd_ping),
     SHELL_CMD(status, NULL, "Show subsystem statuses: espirate status", cmd_status),
+    SHELL_CMD(telemetry, NULL, "Show hardware test telemetry: espirate telemetry", cmd_telemetry),
     SHELL_SUBCMD_SET_END
 );
 
@@ -83,13 +110,14 @@ SHELL_CMD_REGISTER(espirate, &sub_espirate, "ESPirate commands", NULL);
 static int cmd_lua(const struct shell *sh, size_t argc, char **argv)
 {
     if (argc < 2) {
-        shell_error(sh, "Usage: lua \"<code>\" | lua status | lua reset");
+        shell_error(sh, "Usage: lua \"<code>\" | lua run <file> | lua bg <file> | lua status | lua reset");
         return -EINVAL;
     }
 
     if (argc == 2 && strcmp(argv[1], "status") == 0) {
         shell_print(sh, "=== Lua Subsystem Status ===");
-        shell_print(sh, "  State      : %s", lua_manager_is_ready() ? "READY" : "NOT INITIALIZED");
+        shell_print(sh, "  VM State   : %s", lua_manager_is_ready() ? "READY" : "NOT INITIALIZED");
+        shell_print(sh, "  Worker     : %s", lua_worker_is_busy() ? "BUSY" : "IDLE");
         shell_print(sh, "  Allocated  : %u KB", (unsigned int)lua_manager_get_memory_kb());
         shell_print(sh, "  Heap Pool  : %d KB", CONFIG_HEAP_MEM_POOL_SIZE / 1024);
         return 0;
@@ -97,7 +125,7 @@ static int cmd_lua(const struct shell *sh, size_t argc, char **argv)
 
     if (argc == 2 && strcmp(argv[1], "reset") == 0) {
         shell_print(sh, "Resetting Lua VM...");
-        int ret = lua_manager_reset();
+        int ret = lua_worker_reset();
         if (ret == 0) {
             shell_print(sh, "Lua VM reset successful.");
         } else {
@@ -106,9 +134,31 @@ static int cmd_lua(const struct shell *sh, size_t argc, char **argv)
         return ret;
     }
 
+    if (argc >= 3 && strcmp(argv[1], "run") == 0) {
+        return lua_worker_eval_file(argv[2], sh);
+    }
+
+    if (argc >= 3 && strcmp(argv[1], "bg") == 0) {
+        lua_job_t job = {
+            .type = (argv[2][0] == '/') ? LUA_JOB_EVAL_FILE : LUA_JOB_EVAL_STRING,
+            .sh = sh,
+            .done_sem = NULL,
+            .result = 0,
+        };
+        strncpy(job.payload, argv[2], sizeof(job.payload) - 1);
+        job.payload[sizeof(job.payload) - 1] = '\0';
+        int ret = lua_worker_submit_async(&job);
+        if (ret == 0) {
+            shell_print(sh, "[Worker] Job submitted to background worker thread.");
+        } else {
+            shell_error(sh, "[Worker] Failed to submit job: %d", ret);
+        }
+        return ret;
+    }
+
     /* Single string command */
     if (argc == 2) {
-        return lua_manager_eval(argv[1], sh);
+        return lua_worker_eval(argv[1], sh);
     }
 
     /* Combine multiple arguments into a single code buffer */
@@ -128,10 +178,10 @@ static int cmd_lua(const struct shell *sh, size_t argc, char **argv)
     }
     cmd_buf[pos] = '\0';
 
-    return lua_manager_eval(cmd_buf, sh);
+    return lua_worker_eval(cmd_buf, sh);
 }
 
-SHELL_CMD_REGISTER(lua, NULL, "Execute Lua code: lua \"<code>\" | lua status | lua reset", cmd_lua);
+SHELL_CMD_REGISTER(lua, NULL, "Execute Lua code: lua \"<code>\" | lua run <file> | lua status | lua reset", cmd_lua);
 
 void espirate_shell_init(void)
 {

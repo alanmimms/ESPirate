@@ -51,6 +51,8 @@ target_sources(app PRIVATE
   src/main.c
   src/shell_commands.c
   src/lua_manager.c
+  src/lua_worker.c
+  src/fs_manager.c
   src/lua_gpio.c
   src/posix_stubs.c
   src/setjmp.S

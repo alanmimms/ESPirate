@@ -8,6 +8,8 @@
 #include <zephyr/version.h>
 #include "shell_commands.h"
 #include "lua_manager.h"
+#include "lua_worker.h"
+#include "fs_manager.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
@@ -15,14 +17,26 @@ int main(void)
 {
     LOG_INF("==================================================");
     LOG_INF("  ESPirate - Hardware Sequencing Architecture");
-    LOG_INF("  Phase 2: Lua Engine & Dynamic GPIO Control");
+    LOG_INF("  Phase 3: Storage, PSRAM & Lua Worker Thread");
     LOG_INF("  Zephyr Kernel: %s", KERNEL_VERSION_STRING);
     LOG_INF("==================================================");
 
+    /* Initialize LittleFS flash storage */
+    int ret = fs_manager_init();
+    if (ret != 0) {
+        LOG_ERR("Failed to initialize LittleFS storage: %d", ret);
+    }
+
     /* Initialize Lua VM and hardware subsystems */
-    int ret = lua_manager_init();
+    ret = lua_manager_init();
     if (ret != 0) {
         LOG_ERR("Failed to initialize Lua manager: %d", ret);
+    }
+
+    /* Start isolated Lua worker thread */
+    ret = lua_worker_init();
+    if (ret != 0) {
+        LOG_ERR("Failed to initialize Lua worker: %d", ret);
     }
 
     espirate_shell_init();

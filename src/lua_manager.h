@@ -30,6 +30,28 @@ struct shell;
 int lua_manager_eval(const char *code, const struct shell *sh);
 
 /**
+ * @brief Execute a Lua script file in the persistent VM.
+ * @param path Filesystem path to the script (e.g. "/lfs/demo.lua").
+ * @param sh Optional pointer to active shell for console output (can be NULL).
+ * @return 0 on success, negative on error.
+ */
+int lua_manager_eval_file(const char *path, const struct shell *sh);
+
+typedef struct {
+    uint32_t total_cycles;
+    uint32_t passed_cycles;
+    uint32_t failed_cycles;
+    char last_status[32];
+} espirate_telemetry_t;
+
+/**
+ * @brief Safely retrieve the current telemetry state.
+ * @param out Output pointer.
+ * @return 0 on success, negative on error.
+ */
+int espirate_telemetry_get(espirate_telemetry_t *out);
+
+/**
  * @brief Reset and recreate the global Lua VM state.
  * @return 0 on success, negative on error.
  */
