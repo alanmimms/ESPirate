@@ -56,6 +56,7 @@ target_sources(app PRIVATE
   src/fs_manager.c
   src/lua_gpio.c
   src/wifi_manager.c
+  src/captive_dns.c
   src/web_server.c
   src/posix_stubs.c
   src/setjmp.S

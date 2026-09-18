@@ -22,7 +22,6 @@ LOG_MODULE_REGISTER(web_server, LOG_LEVEL_INF);
 
 #define WEB_SERVER_PORT 80
 #define REQ_BUF_SIZE    4096
-#define RESP_BUF_SIZE   4096
 
 K_THREAD_STACK_DEFINE(web_server_stack, 8192);
 static struct k_thread web_server_thread_data;
@@ -33,8 +32,10 @@ static void send_http_response(int sock, int status_code, const char *content_ty
 {
     char hdr[256];
     const char *status_str = "OK";
-    if (status_code == 400) status_str = "Bad Request";
+    if (status_code == 204) status_str = "No Content";
+    else if (status_code == 400) status_str = "Bad Request";
     else if (status_code == 404) status_str = "Not Found";
+    else if (status_code == 405) status_str = "Method Not Allowed";
     else if (status_code == 500) status_str = "Internal Server Error";
 
     int hdr_len = snprintf(hdr, sizeof(hdr),
@@ -64,16 +65,121 @@ static void handle_api_status(int sock)
         "\"worker_busy\":%s,"
         "\"fs_mounted\":%s,"
         "\"wifi_clients\":%u,"
-        "\"ssid\":\"%s\""
+        "\"ssid\":\"%s\","
+        "\"sta_connected\":%s,"
+        "\"sta_ip\":\"%s\","
+        "\"hostname\":\"%s\","
+        "\"fake_internet\":%s"
         "}",
         (long long)k_uptime_get(),
         lua_manager_get_memory_kb(),
         lua_worker_is_busy() ? "true" : "false",
         fs_manager_is_mounted() ? "true" : "false",
         wifi_manager_get_station_count(),
-        wifi_manager_get_ssid());
+        wifi_manager_get_ssid(),
+        wifi_manager_sta_is_connected() ? "true" : "false",
+        wifi_manager_get_sta_ip(),
+        wifi_manager_get_hostname(),
+        wifi_manager_get_fake_internet() ? "true" : "false");
 
     send_http_response(sock, 200, "application/json", json, len);
+}
+
+static void handle_api_wifi_get(int sock)
+{
+    char json[512];
+    int len = snprintf(json, sizeof(json),
+        "{"
+        "\"ap\":{\"ssid\":\"%s\",\"ip\":\"%s\",\"clients\":%u},"
+        "\"sta\":{\"configured\":%s,\"connected\":%s,\"ssid\":\"%s\",\"ip\":\"%s\"},"
+        "\"hostname\":\"%s\","
+        "\"mdns\":\"%s\","
+        "\"fake_internet\":%s"
+        "}",
+        wifi_manager_get_ssid(),
+        wifi_manager_get_ip(),
+        wifi_manager_get_station_count(),
+        wifi_manager_has_saved_sta() ? "true" : "false",
+        wifi_manager_sta_is_connected() ? "true" : "false",
+        wifi_manager_get_sta_ssid(),
+        wifi_manager_get_sta_ip(),
+        wifi_manager_get_hostname(),
+        wifi_manager_get_mdns_domain(),
+        wifi_manager_get_fake_internet() ? "true" : "false");
+
+    send_http_response(sock, 200, "application/json", json, len);
+}
+
+static void extract_json_str(const char *json, const char *key, char *out, size_t max_out)
+{
+    char needle[64];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+    char *p = strstr(json, needle);
+    if (!p) {
+        out[0] = '\0';
+        return;
+    }
+    p += strlen(needle);
+    while (*p && (*p == ' ' || *p == ':' || *p == '\t')) p++;
+    if (*p != '"') {
+        out[0] = '\0';
+        return;
+    }
+    p++; /* skip opening quote */
+
+    size_t i = 0;
+    while (*p && i < max_out - 1) {
+        if (*p == '\\' && *(p + 1)) {
+            p++;
+            if (*p == 'n') out[i++] = '\n';
+            else if (*p == 'r') out[i++] = '\r';
+            else if (*p == 't') out[i++] = '\t';
+            else out[i++] = *p;
+            p++;
+            continue;
+        }
+        if (*p == '"') break;
+        out[i++] = *p++;
+    }
+    out[i] = '\0';
+}
+
+static void handle_api_wifi_post(int sock, const char *body)
+{
+    char ssid[64] = {0};
+    char pass[64] = {0};
+    extract_json_str(body, "ssid", ssid, sizeof(ssid));
+    extract_json_str(body, "password", pass, sizeof(pass));
+
+    if (strlen(ssid) == 0) {
+        send_http_response(sock, 400, "text/plain", "Missing ssid", 12);
+        return;
+    }
+
+    int ret = wifi_manager_connect_sta(ssid, pass, true);
+    if (ret == 0) {
+        send_http_response(sock, 200, "application/json", "{\"status\":\"connecting\"}", 23);
+    } else {
+        send_http_response(sock, 500, "text/plain", "Failed to connect", 17);
+    }
+}
+
+static void handle_api_wifi_config(int sock, const char *body)
+{
+    if (strstr(body, "\"fake_internet\":true") != NULL ||
+        strstr(body, "\"fake_internet\": true") != NULL) {
+        wifi_manager_set_fake_internet(true);
+    } else if (strstr(body, "\"fake_internet\":false") != NULL ||
+               strstr(body, "\"fake_internet\": false") != NULL) {
+        wifi_manager_set_fake_internet(false);
+    }
+    send_http_response(sock, 200, "application/json", "{\"status\":\"ok\"}", 15);
+}
+
+static void handle_api_wifi_forget(int sock)
+{
+    wifi_manager_forget_sta();
+    send_http_response(sock, 200, "application/json", "{\"status\":\"forgotten\"}", 22);
 }
 
 static void handle_api_telemetry(int sock)
@@ -120,68 +226,38 @@ static void handle_api_scripts_list(int sock)
     send_http_response(sock, 200, "application/json", resp, pos);
 }
 
-static void handle_api_get_script(int sock, const char *url)
+static void handle_api_get_script(int sock, const char *path)
 {
-    const char *q = strstr(url, "name=");
-    if (!q) {
+    const char *name_param = strstr(path, "name=");
+    if (!name_param) {
         send_http_response(sock, 400, "text/plain", "Missing name parameter", 22);
         return;
     }
-    q += 5;
+    name_param += 5;
 
-    char filename[128];
-    char full_path[160];
+    char filename[128] = {0};
     size_t i = 0;
-    while (*q && *q != ' ' && *q != '&' && i < sizeof(filename) - 1) {
-        filename[i++] = *q++;
+    while (*name_param && *name_param != '&' && i < sizeof(filename) - 1) {
+        filename[i++] = *name_param++;
     }
-    filename[i] = '\0';
 
+    char full_path[160];
     if (filename[0] == '/') {
         strncpy(full_path, filename, sizeof(full_path) - 1);
     } else {
         snprintf(full_path, sizeof(full_path), "%s/%s", ESPIRATE_FS_MOUNT_POINT, filename);
     }
 
-    char file_buf[2048];
+    static char buf[3072];
     size_t bytes_read = 0;
-    int rc = fs_manager_read_file(full_path, file_buf, sizeof(file_buf) - 1, &bytes_read);
+    int rc = fs_manager_read_file(full_path, buf, sizeof(buf) - 1, &bytes_read);
     if (rc != 0) {
-        send_http_response(sock, 404, "text/plain", "Script file not found", 21);
+        send_http_response(sock, 404, "text/plain", "Script not found", 16);
         return;
     }
-    file_buf[bytes_read] = '\0';
+    buf[bytes_read] = '\0';
 
-    send_http_response(sock, 200, "text/plain", file_buf, bytes_read);
-}
-
-static void extract_json_str(const char *body, const char *key, char *out, size_t max_out)
-{
-    out[0] = '\0';
-    char needle[64];
-    snprintf(needle, sizeof(needle), "\"%s\"", key);
-    const char *p = strstr(body, needle);
-    if (!p) return;
-    p = strchr(p + strlen(needle), ':');
-    if (!p) return;
-    p = strchr(p, '"');
-    if (!p) return;
-    p++;
-    size_t i = 0;
-    while (*p && i < max_out - 1) {
-        if (*p == '\\' && *(p + 1)) {
-            p++;
-            if (*p == 'n') out[i++] = '\n';
-            else if (*p == 'r') out[i++] = '\r';
-            else if (*p == 't') out[i++] = '\t';
-            else out[i++] = *p;
-            p++;
-            continue;
-        }
-        if (*p == '"') break;
-        out[i++] = *p++;
-    }
-    out[i] = '\0';
+    send_http_response(sock, 200, "text/plain", buf, bytes_read);
 }
 
 static void handle_api_save_script(int sock, const char *body)
@@ -268,7 +344,7 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
     ARG_UNUSED(arg2);
     ARG_UNUSED(arg3);
 
-    /* Small delay on boot to allow Wi-Fi interface to configure IP */
+    /* Delay to allow Wi-Fi interface initialization */
     k_sleep(K_MSEC(1000));
 
     int server_fd = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -299,7 +375,7 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
     }
 
     s_running = true;
-    LOG_INF("ESPirate Web Server active on port %d (http://192.168.4.1)", WEB_SERVER_PORT);
+    LOG_INF("ESPirate Web Server active on port %d (http://%s)", WEB_SERVER_PORT, wifi_manager_get_ip());
 
     static char req_buf[REQ_BUF_SIZE];
 
@@ -329,9 +405,29 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
             }
 
             if (strcmp(method, "GET") == 0) {
-                if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0) {
+                /* Android 17 / Chrome 204 Probe */
+                if (strcmp(path, "/generate_204") == 0 || strcmp(path, "/gen_204") == 0 ||
+                    strstr(path, "generate_204") != NULL || strstr(path, "gen_204") != NULL) {
+                    send_http_response(client_fd, 204, "text/plain", NULL, 0);
+                }
+                /* Apple Captive Portal Detection */
+                else if (strcmp(path, "/hotspot-detect.html") == 0 ||
+                         strcmp(path, "/library/test/success.html") == 0) {
+                    const char apple_ok[] = "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>";
+                    send_http_response(client_fd, 200, "text/html", apple_ok, sizeof(apple_ok) - 1);
+                }
+                /* Microsoft NCSI Probes */
+                else if (strcmp(path, "/ncsi.txt") == 0) {
+                    send_http_response(client_fd, 200, "text/plain", "Microsoft NCSI", 14);
+                } else if (strcmp(path, "/connecttest.txt") == 0) {
+                    send_http_response(client_fd, 200, "text/plain", "Microsoft Connect Test", 22);
+                }
+                /* Dashboard & API endpoints */
+                else if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0) {
                     send_http_response(client_fd, 200, "text/html",
                                        ESPIRATE_DASHBOARD_HTML, sizeof(ESPIRATE_DASHBOARD_HTML) - 1);
+                } else if (strcmp(path, "/api/wifi") == 0) {
+                    handle_api_wifi_get(client_fd);
                 } else if (strcmp(path, "/api/status") == 0) {
                     handle_api_status(client_fd);
                 } else if (strcmp(path, "/api/telemetry") == 0) {
@@ -340,11 +436,21 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
                     handle_api_scripts_list(client_fd);
                 } else if (strncmp(path, "/api/script?", 12) == 0) {
                     handle_api_get_script(client_fd, path);
+                } else if (wifi_manager_get_fake_internet()) {
+                    /* If fake internet is active, serve dashboard for any captive portal browser */
+                    send_http_response(client_fd, 200, "text/html",
+                                       ESPIRATE_DASHBOARD_HTML, sizeof(ESPIRATE_DASHBOARD_HTML) - 1);
                 } else {
                     send_http_response(client_fd, 404, "text/plain", "Not Found", 9);
                 }
             } else if (strcmp(method, "POST") == 0) {
-                if (strcmp(path, "/api/telemetry/reset") == 0) {
+                if (strcmp(path, "/api/wifi") == 0) {
+                    handle_api_wifi_post(client_fd, body);
+                } else if (strcmp(path, "/api/wifi/config") == 0) {
+                    handle_api_wifi_config(client_fd, body);
+                } else if (strcmp(path, "/api/wifi/forget") == 0) {
+                    handle_api_wifi_forget(client_fd);
+                } else if (strcmp(path, "/api/telemetry/reset") == 0) {
                     espirate_telemetry_reset();
                     send_http_response(client_fd, 200, "application/json", "{\"status\":\"ok\"}", 15);
                 } else if (strcmp(path, "/api/reset") == 0) {

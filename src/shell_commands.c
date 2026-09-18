@@ -74,6 +74,14 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
                 wifi_manager_is_ap_active() ? "ACTIVE" : "INACTIVE",
                 wifi_manager_get_ssid(),
                 wifi_manager_get_ip());
+    shell_print(sh, "  [*] Wi-Fi Station (STA)      - %s (SSID: %s, IP: %s)",
+                wifi_manager_sta_is_connected() ? "CONNECTED" : (wifi_manager_has_saved_sta() ? "CONNECTING" : "IDLE"),
+                wifi_manager_get_sta_ssid(),
+                wifi_manager_get_sta_ip());
+    shell_print(sh, "  [*] Discovery & mDNS         - ACTIVE (http://%s)",
+                wifi_manager_get_mdns_domain());
+    shell_print(sh, "  [*] Pretend Internet         - %s",
+                wifi_manager_get_fake_internet() ? "ENABLED (204 Probe/DNS)" : "DISABLED");
     shell_print(sh, "  [*] Phase 4: Web Server      - %s (port 80, clients: %u)",
                 web_server_is_running() ? "ACTIVE" : "INACTIVE",
                 wifi_manager_get_station_count());
@@ -107,12 +115,100 @@ static int cmd_wifi_status(const struct shell *sh, size_t argc, char **argv)
 
     shell_print(sh, "=== Wi-Fi Subsystem Status ===");
     shell_print(sh, "  AP State      : %s", wifi_manager_is_ap_active() ? "BROADCASTING" : "STOPPED");
-    shell_print(sh, "  SSID          : %s", wifi_manager_get_ssid());
-    shell_print(sh, "  IP Address    : %s", wifi_manager_get_ip());
+    shell_print(sh, "  AP SSID       : %s", wifi_manager_get_ssid());
+    shell_print(sh, "  AP IP Address : %s", wifi_manager_get_ip());
     shell_print(sh, "  Connected STAs: %u", wifi_manager_get_station_count());
+    shell_print(sh, "  STA State     : %s", wifi_manager_sta_is_connected() ? "CONNECTED" :
+                                         (wifi_manager_has_saved_sta() ? "CONNECTING" : "DISCONNECTED"));
+    shell_print(sh, "  STA SSID      : %s", wifi_manager_get_sta_ssid());
+    shell_print(sh, "  STA IP Address: %s", wifi_manager_get_sta_ip());
+    shell_print(sh, "  Password      : %s", wifi_manager_has_saved_sta() ? "[CONFIGURED / HIDDEN]" : "[NONE]");
+    shell_print(sh, "  mDNS Hostname : %s (http://%s)",
+                wifi_manager_get_hostname(), wifi_manager_get_mdns_domain());
+    shell_print(sh, "  Fake Internet : %s",
+                wifi_manager_get_fake_internet() ? "ENABLED (Android 204 & DNS Spoof)" : "DISABLED");
     shell_print(sh, "  Web Server    : %s (http://%s)",
                 web_server_is_running() ? "RUNNING" : "STOPPED",
                 wifi_manager_get_ip());
+    return 0;
+}
+
+static int cmd_wifi_connect(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 2) {
+        shell_error(sh, "Usage: wifi connect <ssid> [password]");
+        return -EINVAL;
+    }
+
+    const char *ssid = argv[1];
+    const char *pass = (argc >= 3) ? argv[2] : NULL;
+
+    shell_print(sh, "Connecting Station to '%s' (credentials will be saved securely)...", ssid);
+    int ret = wifi_manager_connect_sta(ssid, pass, true);
+    if (ret == 0) {
+        shell_print(sh, "Connection initiated. Use 'wifi status' to check IP.");
+    } else {
+        shell_error(sh, "Connection initiation failed: %d", ret);
+    }
+    return ret;
+}
+
+static int cmd_wifi_disconnect(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    shell_print(sh, "Disconnecting Station...");
+    int ret = wifi_manager_disconnect_sta();
+    if (ret == 0) {
+        shell_print(sh, "Station disconnected.");
+    } else {
+        shell_error(sh, "Disconnect failed: %d", ret);
+    }
+    return ret;
+}
+
+static int cmd_wifi_forget(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    shell_print(sh, "Forgetting saved Station credentials...");
+    wifi_manager_forget_sta();
+    shell_print(sh, "Station credentials forgotten.");
+    return 0;
+}
+
+static int cmd_wifi_fake_internet(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 2) {
+        shell_print(sh, "Pretend Internet Connectivity: %s",
+                    wifi_manager_get_fake_internet() ? "ENABLED" : "DISABLED");
+        shell_print(sh, "Usage: wifi fake_internet <on|off>");
+        return 0;
+    }
+
+    if (strcmp(argv[1], "on") == 0 || strcmp(argv[1], "1") == 0 || strcmp(argv[1], "enable") == 0) {
+        wifi_manager_set_fake_internet(true);
+        shell_print(sh, "Pretend Internet Connectivity ENABLED (204 probe & captive DNS active).");
+    } else if (strcmp(argv[1], "off") == 0 || strcmp(argv[1], "0") == 0 || strcmp(argv[1], "disable") == 0) {
+        wifi_manager_set_fake_internet(false);
+        shell_print(sh, "Pretend Internet Connectivity DISABLED.");
+    } else {
+        shell_error(sh, "Invalid option. Use 'on' or 'off'.");
+        return -EINVAL;
+    }
+    return 0;
+}
+
+static int cmd_wifi_hostname(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    shell_print(sh, "mDNS Hostname: %s", wifi_manager_get_hostname());
+    shell_print(sh, "mDNS Domain  : %s", wifi_manager_get_mdns_domain());
+    shell_print(sh, "Dashboard URL: http://%s", wifi_manager_get_mdns_domain());
     return 0;
 }
 
@@ -148,7 +244,12 @@ static int cmd_wifi_stop(const struct shell *sh, size_t argc, char **argv)
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_wifi,
-    SHELL_CMD(status, NULL, "Show Wi-Fi & Web status: wifi status", cmd_wifi_status),
+    SHELL_CMD(status, NULL, "Show Wi-Fi & mDNS status: wifi status", cmd_wifi_status),
+    SHELL_CMD(connect, NULL, "Connect STA and save credentials: wifi connect <ssid> [password]", cmd_wifi_connect),
+    SHELL_CMD(disconnect, NULL, "Disconnect STA: wifi disconnect", cmd_wifi_disconnect),
+    SHELL_CMD(forget, NULL, "Forget saved STA credentials: wifi forget", cmd_wifi_forget),
+    SHELL_CMD(fake_internet, NULL, "Toggle pretend internet (204 probe): wifi fake_internet <on|off>", cmd_wifi_fake_internet),
+    SHELL_CMD(hostname, NULL, "Show mDNS domain: wifi hostname", cmd_wifi_hostname),
     SHELL_CMD(ap, NULL, "Start Soft-AP: wifi ap [ssid] [password]", cmd_wifi_ap),
     SHELL_CMD(stop, NULL, "Stop Soft-AP: wifi stop", cmd_wifi_stop),
     SHELL_SUBCMD_SET_END

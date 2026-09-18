@@ -11,6 +11,7 @@
 #include "lua_worker.h"
 #include "fs_manager.h"
 #include "wifi_manager.h"
+#include "captive_dns.h"
 #include "web_server.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
@@ -19,7 +20,7 @@ int main(void)
 {
     LOG_INF("==================================================");
     LOG_INF("  ESPirate - Hardware Sequencing Architecture");
-    LOG_INF("  Phase 4: Wi-Fi AP, Web Server & Remote Sequencing");
+    LOG_INF("  Wi-Fi Dual-Mode (AP+STA), mDNS & Web Dashboard");
     LOG_INF("  Zephyr Kernel: %s", KERNEL_VERSION_STRING);
     LOG_INF("==================================================");
 
@@ -41,10 +42,16 @@ int main(void)
         LOG_ERR("Failed to initialize Lua worker: %d", ret);
     }
 
-    /* Initialize Wi-Fi AP and DHCP server */
+    /* Initialize Wi-Fi AP, STA, and dynamic hostname */
     ret = wifi_manager_init();
     if (ret != 0) {
-        LOG_ERR("Failed to initialize Wi-Fi AP: %d", ret);
+        LOG_ERR("Failed to initialize Wi-Fi manager: %d", ret);
+    }
+
+    /* Start captive DNS responder on port 53 */
+    ret = captive_dns_init();
+    if (ret != 0) {
+        LOG_ERR("Failed to initialize Captive DNS: %d", ret);
     }
 
     /* Start HTTP web server on port 80 */
@@ -56,7 +63,10 @@ int main(void)
     espirate_shell_init();
 
     LOG_INF("ESPirate shell ready on UART console.");
-    LOG_INF("Web Dashboard available at http://%s", wifi_manager_get_ip());
+    LOG_INF("Soft-AP Dashboard : http://%s", wifi_manager_get_ip());
+    LOG_INF("mDNS Local URL    : http://%s", wifi_manager_get_mdns_domain());
+    LOG_INF("Pretend Internet  : %s",
+            wifi_manager_get_fake_internet() ? "ENABLED (Android 204 active)" : "DISABLED");
     LOG_INF("Type 'help' or 'lua \"print(\\'hello\\')\"' to begin.");
 
     while (1) {
