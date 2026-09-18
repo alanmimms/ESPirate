@@ -10,7 +10,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define ESPIRATE_DEFAULT_SSID "ESPirate-AP"
 #define ESPIRATE_DEFAULT_IP   "192.168.4.1"
 #define ESPIRATE_DEFAULT_MASK "255.255.255.0"
 
@@ -18,19 +17,32 @@
 extern "C" {
 #endif
 
+typedef enum {
+    ESPIRATE_WIFI_MODE_AP = 0,
+    ESPIRATE_WIFI_MODE_STA = 1,
+} espirate_wifi_mode_t;
+
 /* Subsystem Initialization */
 int wifi_manager_init(void);
 
+/* Mode Management (Exclusive AP or STA) */
+int wifi_manager_set_mode(espirate_wifi_mode_t mode, bool save);
+espirate_wifi_mode_t wifi_manager_get_active_mode(void);
+espirate_wifi_mode_t wifi_manager_get_configured_mode(void);
+const char *wifi_manager_get_mode_str(void);
+
 /* Soft-AP Management */
-int wifi_manager_start_ap(const char *ssid, const char *password);
-int wifi_manager_stop_ap(void);
-bool wifi_manager_is_ap_active(void);
-const char *wifi_manager_get_ssid(void);
-const char *wifi_manager_get_ip(void);
+int wifi_manager_set_ap_ssid(const char *ssid, bool save);
+const char *wifi_manager_get_ap_ssid(void);
+const char *wifi_manager_get_ap_ip(void);
 uint32_t wifi_manager_get_station_count(void);
+bool wifi_manager_is_ap_active(void);
+const char *wifi_manager_get_ssid(void); /* AP alias */
+const char *wifi_manager_get_ip(void);   /* Active IP alias */
 
 /* Station (STA) Client Management */
-int wifi_manager_connect_sta(const char *ssid, const char *password, bool save);
+int wifi_manager_set_sta_credentials(const char *ssid, const char *password, bool save);
+int wifi_manager_connect_sta(void);
 int wifi_manager_disconnect_sta(void);
 int wifi_manager_forget_sta(void);
 bool wifi_manager_sta_is_connected(void);

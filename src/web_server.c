@@ -9,6 +9,7 @@
 #include <zephyr/fs/fs.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 
 #include "web_server.h"
@@ -64,6 +65,7 @@ static void handle_api_status(int sock)
         "\"lua_mem_kb\":%zu,"
         "\"worker_busy\":%s,"
         "\"fs_mounted\":%s,"
+        "\"wifi_mode\":\"%s\","
         "\"wifi_clients\":%u,"
         "\"ssid\":\"%s\","
         "\"sta_connected\":%s,"
@@ -75,6 +77,7 @@ static void handle_api_status(int sock)
         lua_manager_get_memory_kb(),
         lua_worker_is_busy() ? "true" : "false",
         fs_manager_is_mounted() ? "true" : "false",
+        wifi_manager_get_mode_str(),
         wifi_manager_get_station_count(),
         wifi_manager_get_ssid(),
         wifi_manager_sta_is_connected() ? "true" : "false",
@@ -90,14 +93,18 @@ static void handle_api_wifi_get(int sock)
     char json[512];
     int len = snprintf(json, sizeof(json),
         "{"
+        "\"mode\":\"%s\","
+        "\"configured_mode\":\"%s\","
         "\"ap\":{\"ssid\":\"%s\",\"ip\":\"%s\",\"clients\":%u},"
         "\"sta\":{\"configured\":%s,\"connected\":%s,\"ssid\":\"%s\",\"ip\":\"%s\"},"
         "\"hostname\":\"%s\","
         "\"mdns\":\"%s\","
         "\"fake_internet\":%s"
         "}",
-        wifi_manager_get_ssid(),
-        wifi_manager_get_ip(),
+        wifi_manager_get_mode_str(),
+        (wifi_manager_get_configured_mode() == ESPIRATE_WIFI_MODE_STA) ? "STA" : "AP",
+        wifi_manager_get_ap_ssid(),
+        wifi_manager_get_ap_ip(),
         wifi_manager_get_station_count(),
         wifi_manager_has_saved_sta() ? "true" : "false",
         wifi_manager_sta_is_connected() ? "true" : "false",
@@ -146,21 +153,55 @@ static void extract_json_str(const char *json, const char *key, char *out, size_
 
 static void handle_api_wifi_post(int sock, const char *body)
 {
+    char ap_ssid[64] = {0};
     char ssid[64] = {0};
     char pass[64] = {0};
+    extract_json_str(body, "ap_ssid", ap_ssid, sizeof(ap_ssid));
     extract_json_str(body, "ssid", ssid, sizeof(ssid));
     extract_json_str(body, "password", pass, sizeof(pass));
 
-    if (strlen(ssid) == 0) {
-        send_http_response(sock, 400, "text/plain", "Missing ssid", 12);
+    bool updated = false;
+
+    if (strlen(ap_ssid) > 0) {
+        wifi_manager_set_ap_ssid(ap_ssid, true);
+        updated = true;
+    }
+
+    if (strlen(ssid) > 0) {
+        wifi_manager_set_sta_credentials(ssid, pass, true);
+        send_http_response(sock, 200, "application/json", "{\"status\":\"connecting\"}", 23);
+        k_msleep(50);
+        wifi_manager_set_mode(ESPIRATE_WIFI_MODE_STA, true);
         return;
     }
 
-    int ret = wifi_manager_connect_sta(ssid, pass, true);
-    if (ret == 0) {
-        send_http_response(sock, 200, "application/json", "{\"status\":\"connecting\"}", 23);
+    if (updated) {
+        send_http_response(sock, 200, "application/json", "{\"status\":\"ok\"}", 15);
+        return;
+    }
+
+    send_http_response(sock, 400, "text/plain", "Missing ssid or ap_ssid", 23);
+}
+
+static void handle_api_wifi_mode(int sock, const char *body)
+{
+    char mode[16] = {0};
+    extract_json_str(body, "mode", mode, sizeof(mode));
+
+    if (strcasecmp(mode, "sta") == 0) {
+        if (!wifi_manager_has_saved_sta()) {
+            send_http_response(sock, 400, "application/json", "{\"error\":\"No saved STA credentials\"}", 36);
+            return;
+        }
+        send_http_response(sock, 200, "application/json", "{\"status\":\"switching_to_sta\"}", 30);
+        k_msleep(50);
+        wifi_manager_set_mode(ESPIRATE_WIFI_MODE_STA, true);
+    } else if (strcasecmp(mode, "ap") == 0) {
+        send_http_response(sock, 200, "application/json", "{\"status\":\"switching_to_ap\"}", 29);
+        k_msleep(50);
+        wifi_manager_set_mode(ESPIRATE_WIFI_MODE_AP, true);
     } else {
-        send_http_response(sock, 500, "text/plain", "Failed to connect", 17);
+        send_http_response(sock, 400, "application/json", "{\"error\":\"Invalid mode\"}", 24);
     }
 }
 
@@ -446,6 +487,8 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
             } else if (strcmp(method, "POST") == 0) {
                 if (strcmp(path, "/api/wifi") == 0) {
                     handle_api_wifi_post(client_fd, body);
+                } else if (strcmp(path, "/api/wifi/mode") == 0) {
+                    handle_api_wifi_mode(client_fd, body);
                 } else if (strcmp(path, "/api/wifi/config") == 0) {
                     handle_api_wifi_config(client_fd, body);
                 } else if (strcmp(path, "/api/wifi/forget") == 0) {
