@@ -79,6 +79,18 @@ int espirate_telemetry_get(espirate_telemetry_t *out)
     return 0;
 }
 
+int espirate_telemetry_reset(void)
+{
+    k_mutex_lock(&s_telemetry_mutex, K_FOREVER);
+    s_telemetry.total_cycles = 0;
+    s_telemetry.passed_cycles = 0;
+    s_telemetry.failed_cycles = 0;
+    strncpy(s_telemetry.last_status, "IDLE", sizeof(s_telemetry.last_status) - 1);
+    s_telemetry.last_status[sizeof(s_telemetry.last_status) - 1] = '\0';
+    k_mutex_unlock(&s_telemetry_mutex);
+    return 0;
+}
+
 static int l_telemetry_set(lua_State *L_state)
 {
     const char *key = luaL_checkstring(L_state, 1);

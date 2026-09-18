@@ -10,6 +10,8 @@
 #include "lua_manager.h"
 #include "lua_worker.h"
 #include "fs_manager.h"
+#include "wifi_manager.h"
+#include "web_server.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
@@ -17,7 +19,7 @@ int main(void)
 {
     LOG_INF("==================================================");
     LOG_INF("  ESPirate - Hardware Sequencing Architecture");
-    LOG_INF("  Phase 3: Storage, PSRAM & Lua Worker Thread");
+    LOG_INF("  Phase 4: Wi-Fi AP, Web Server & Remote Sequencing");
     LOG_INF("  Zephyr Kernel: %s", KERNEL_VERSION_STRING);
     LOG_INF("==================================================");
 
@@ -39,9 +41,22 @@ int main(void)
         LOG_ERR("Failed to initialize Lua worker: %d", ret);
     }
 
+    /* Initialize Wi-Fi AP and DHCP server */
+    ret = wifi_manager_init();
+    if (ret != 0) {
+        LOG_ERR("Failed to initialize Wi-Fi AP: %d", ret);
+    }
+
+    /* Start HTTP web server on port 80 */
+    ret = web_server_init();
+    if (ret != 0) {
+        LOG_ERR("Failed to initialize Web server: %d", ret);
+    }
+
     espirate_shell_init();
 
     LOG_INF("ESPirate shell ready on UART console.");
+    LOG_INF("Web Dashboard available at http://%s", wifi_manager_get_ip());
     LOG_INF("Type 'help' or 'lua \"print(\\'hello\\')\"' to begin.");
 
     while (1) {

@@ -53,6 +53,8 @@ static int cmd_echo(const struct shell *sh, size_t argc, char **argv)
 
 #include "fs_manager.h"
 #include "lua_worker.h"
+#include "wifi_manager.h"
+#include "web_server.h"
 
 static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 {
@@ -68,7 +70,13 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
                 fs_manager_is_mounted() ? "MOUNTED" : "NOT MOUNTED");
     shell_print(sh, "  [*] Phase 3: Lua Worker      - ACTIVE (%s)",
                 lua_worker_is_busy() ? "BUSY" : "IDLE");
-    shell_print(sh, "  [ ] Phase 4: Wi-Fi AP & Web  - NOT STARTED");
+    shell_print(sh, "  [*] Phase 4: Wi-Fi AP        - %s (SSID: %s, %s)",
+                wifi_manager_is_ap_active() ? "ACTIVE" : "INACTIVE",
+                wifi_manager_get_ssid(),
+                wifi_manager_get_ip());
+    shell_print(sh, "  [*] Phase 4: Web Server      - %s (port 80, clients: %u)",
+                web_server_is_running() ? "ACTIVE" : "INACTIVE",
+                wifi_manager_get_station_count());
     return 0;
 }
 
@@ -91,6 +99,62 @@ static int cmd_telemetry(const struct shell *sh, size_t argc, char **argv)
     shell_print(sh, "  Last Status   : %s", t.last_status);
     return 0;
 }
+
+static int cmd_wifi_status(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    shell_print(sh, "=== Wi-Fi Subsystem Status ===");
+    shell_print(sh, "  AP State      : %s", wifi_manager_is_ap_active() ? "BROADCASTING" : "STOPPED");
+    shell_print(sh, "  SSID          : %s", wifi_manager_get_ssid());
+    shell_print(sh, "  IP Address    : %s", wifi_manager_get_ip());
+    shell_print(sh, "  Connected STAs: %u", wifi_manager_get_station_count());
+    shell_print(sh, "  Web Server    : %s (http://%s)",
+                web_server_is_running() ? "RUNNING" : "STOPPED",
+                wifi_manager_get_ip());
+    return 0;
+}
+
+static int cmd_wifi_ap(const struct shell *sh, size_t argc, char **argv)
+{
+    const char *ssid = (argc >= 2) ? argv[1] : ESPIRATE_DEFAULT_SSID;
+    const char *psk = (argc >= 3) ? argv[2] : NULL;
+
+    shell_print(sh, "Configuring Soft-AP '%s' (Security: %s)...",
+                ssid, psk ? "WPA2-PSK" : "Open");
+    int ret = wifi_manager_start_ap(ssid, psk);
+    if (ret == 0) {
+        shell_print(sh, "Soft-AP '%s' started successfully at %s", ssid, wifi_manager_get_ip());
+    } else {
+        shell_error(sh, "Failed to start Soft-AP: %d", ret);
+    }
+    return ret;
+}
+
+static int cmd_wifi_stop(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    shell_print(sh, "Stopping Wi-Fi Soft-AP...");
+    int ret = wifi_manager_stop_ap();
+    if (ret == 0) {
+        shell_print(sh, "Soft-AP stopped.");
+    } else {
+        shell_error(sh, "Failed to stop Soft-AP: %d", ret);
+    }
+    return ret;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_wifi,
+    SHELL_CMD(status, NULL, "Show Wi-Fi & Web status: wifi status", cmd_wifi_status),
+    SHELL_CMD(ap, NULL, "Start Soft-AP: wifi ap [ssid] [password]", cmd_wifi_ap),
+    SHELL_CMD(stop, NULL, "Stop Soft-AP: wifi stop", cmd_wifi_stop),
+    SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(wifi, &sub_wifi, "Wi-Fi commands", NULL);
 
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_espirate,
     SHELL_CMD(echo, NULL, "Echo back arguments: espirate echo <string>", cmd_echo),

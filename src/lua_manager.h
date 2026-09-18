@@ -52,6 +52,12 @@ typedef struct {
 int espirate_telemetry_get(espirate_telemetry_t *out);
 
 /**
+ * @brief Reset telemetry metrics back to initial zeroes.
+ * @return 0 on success.
+ */
+int espirate_telemetry_reset(void);
+
+/**
  * @brief Reset and recreate the global Lua VM state.
  * @return 0 on success, negative on error.
  */

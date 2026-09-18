@@ -13,3 +13,8 @@
     status = "okay";
     size = <DT_SIZE_M(8)>;
 };
+
+/* ESP32-S3 Wi-Fi Controller */
+&wifi {
+    status = "okay";
+};

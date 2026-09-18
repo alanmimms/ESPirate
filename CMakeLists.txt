@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 cmake_minimum_required(VERSION 3.20.0)
 
+set(ENV{ZEPHYR_BASE} "/home/alan/zephyr-projects/zephyr")
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(espirate)
 
@@ -54,6 +55,8 @@ target_sources(app PRIVATE
   src/lua_worker.c
   src/fs_manager.c
   src/lua_gpio.c
+  src/wifi_manager.c
+  src/web_server.c
   src/posix_stubs.c
   src/setjmp.S
   ${LUA_SOURCES}
