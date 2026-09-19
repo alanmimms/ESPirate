@@ -49,6 +49,8 @@ bool wifi_manager_sta_is_connected(void);
 bool wifi_manager_has_saved_sta(void);
 const char *wifi_manager_get_sta_ssid(void);
 const char *wifi_manager_get_sta_ip(void);
+uint32_t wifi_manager_get_sta_retry_count(void);
+uint32_t wifi_manager_get_sta_max_retries(void);
 
 /* Hostname & mDNS Identification */
 const char *wifi_manager_get_hostname(void);

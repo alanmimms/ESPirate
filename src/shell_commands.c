@@ -80,10 +80,17 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
                 wifi_manager_get_ap_ip(),
                 wifi_manager_get_station_count());
     bool is_sta_mode = (wifi_manager_get_active_mode() == ESPIRATE_WIFI_MODE_STA);
-    shell_print(sh, "  [*] Wi-Fi Station (STA)      - %s (SSID: %s, IP: %s)",
-                is_sta_mode ? (wifi_manager_sta_is_connected() ? "CONNECTED" : "CONNECTING") : "DISCONNECTED",
-                wifi_manager_get_sta_ssid(),
-                wifi_manager_get_sta_ip());
+    if (is_sta_mode) {
+        if (wifi_manager_sta_is_connected()) {
+            shell_print(sh, "  [*] Wi-Fi Station (STA)      - CONNECTED (SSID: %s, IP: %s)",
+                        wifi_manager_get_sta_ssid(), wifi_manager_get_sta_ip());
+        } else {
+            shell_print(sh, "  [*] Wi-Fi Station (STA)      - CONNECTING (%u/%u)",
+                        wifi_manager_get_sta_retry_count(), wifi_manager_get_sta_max_retries());
+        }
+    } else {
+        shell_print(sh, "  [*] Wi-Fi Station (STA)      - DISCONNECTED");
+    }
     shell_print(sh, "  [*] Discovery & mDNS         - ACTIVE (http://%s)",
                 wifi_manager_get_mdns_domain());
     shell_print(sh, "  [*] Pretend Internet         - %s",
@@ -127,8 +134,16 @@ static int cmd_wifi_status(const struct shell *sh, size_t argc, char **argv)
     shell_print(sh, "  Soft-AP IP    : %s", wifi_manager_get_ap_ip());
     shell_print(sh, "  Connected STAs: %u", wifi_manager_get_station_count());
     bool is_sta = (wifi_manager_get_active_mode() == ESPIRATE_WIFI_MODE_STA);
-    shell_print(sh, "  STA State     : %s", is_sta ? (wifi_manager_sta_is_connected() ? "CONNECTED" : "CONNECTING (15s watchdog)") :
-                                         "DISCONNECTED (AP Mode Active)");
+    if (is_sta) {
+        if (wifi_manager_sta_is_connected()) {
+            shell_print(sh, "  STA State     : CONNECTED");
+        } else {
+            shell_print(sh, "  STA State     : CONNECTING (attempt %u/%u)",
+                        wifi_manager_get_sta_retry_count(), wifi_manager_get_sta_max_retries());
+        }
+    } else {
+        shell_print(sh, "  STA State     : DISCONNECTED (AP Mode Active)");
+    }
     shell_print(sh, "  STA SSID      : %s", wifi_manager_get_sta_ssid());
     shell_print(sh, "  STA IP Address: %s", wifi_manager_get_sta_ip());
     shell_print(sh, "  Credentials   : %s", wifi_manager_has_saved_sta() ? "[CONFIGURED / SECURED]" : "[NONE]");
@@ -190,7 +205,8 @@ static int cmd_wifi_sta(const struct shell *sh, size_t argc, char **argv)
     wifi_manager_set_sta_credentials(ssid, pass, true);
     int ret = wifi_manager_set_mode(ESPIRATE_WIFI_MODE_STA, true);
     if (ret == 0) {
-        shell_print(sh, "Station mode initiated (15s watchdog fallback to AP if unreachable).");
+        shell_print(sh, "Station mode initiated (up to %u attempts before fallback to AP).",
+                    wifi_manager_get_sta_max_retries());
     } else {
         shell_error(sh, "Station connection failed: %d", ret);
     }

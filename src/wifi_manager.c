@@ -46,7 +46,15 @@ static struct wifi_connect_req_params s_ap_config;
 static struct wifi_connect_req_params s_sta_config;
 static struct net_mgmt_event_callback s_mgmt_cb;
 
+#define STA_MAX_RETRIES          3
+#define STA_WATCHDOG_TIMEOUT_SEC 15
+#define STA_RETRY_DELAY_SEC      2
+
 static struct k_work_delayable s_sta_watchdog;
+static struct k_work_delayable s_sta_retry_work;
+static uint32_t s_sta_retry_count = 0;
+static bool s_sta_connecting = false;
+static bool s_sta_retry_pending = false;
 
 static uint8_t s_mac[6] = {0};
 static char s_hostname[32] = "espirate";
@@ -74,6 +82,9 @@ static int stop_ap_mode(void);
 static int stop_sta_mode(void);
 static int start_dhcpv4_server(void);
 static void sta_watchdog_handler(struct k_work *work);
+static void sta_retry_work_handler(struct k_work *work);
+static void trigger_sta_retry(void);
+static void fallback_to_ap_mode(void);
 
 /* Obfuscate / de-obfuscate credentials using MAC-derived keystream */
 static void crypt_record(struct wifi_sta_record *rec)
@@ -265,15 +276,72 @@ static void save_configured_mode(espirate_wifi_mode_t mode)
     }
 }
 
+static void fallback_to_ap_mode(void)
+{
+    s_sta_connecting = false;
+    s_sta_connected = false;
+    s_sta_retry_pending = false;
+    k_work_cancel_delayable(&s_sta_watchdog);
+    k_work_cancel_delayable(&s_sta_retry_work);
+    stop_sta_mode();
+    start_ap_mode();
+}
+
+static void trigger_sta_retry(void)
+{
+    if (s_active_mode != ESPIRATE_WIFI_MODE_STA || !s_sta_connecting || s_sta_connected) {
+        return;
+    }
+
+    if (s_sta_retry_pending) {
+        return;
+    }
+
+    if (s_sta_retry_count < STA_MAX_RETRIES) {
+        s_sta_retry_count++;
+        s_sta_retry_pending = true;
+        LOG_WRN("Wi-Fi Station connection attempt failed. Retrying (%u/%u) in %d seconds...",
+                s_sta_retry_count, STA_MAX_RETRIES, STA_RETRY_DELAY_SEC);
+        k_work_reschedule(&s_sta_retry_work, K_SECONDS(STA_RETRY_DELAY_SEC));
+        k_work_reschedule(&s_sta_watchdog, K_SECONDS(STA_WATCHDOG_TIMEOUT_SEC + STA_RETRY_DELAY_SEC));
+    } else {
+        LOG_WRN("Wi-Fi Station connection failed after %u attempts. Falling back to Soft-AP mode (%s)...",
+                STA_MAX_RETRIES, s_ap_ssid);
+        fallback_to_ap_mode();
+    }
+}
+
+static void sta_retry_work_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+
+    s_sta_retry_pending = false;
+
+    if (s_active_mode != ESPIRATE_WIFI_MODE_STA || !s_sta_connecting || s_sta_connected) {
+        return;
+    }
+
+    LOG_INF("Retrying Station connection to '%s' (attempt %u/%u)...",
+            s_sta_ssid, s_sta_retry_count, STA_MAX_RETRIES);
+
+    int ret = net_mgmt(NET_REQUEST_WIFI_CONNECT, s_iface, &s_sta_config, sizeof(s_sta_config));
+    if (ret != 0) {
+        LOG_WRN("NET_REQUEST_WIFI_CONNECT retry failed: %d", ret);
+        trigger_sta_retry();
+    }
+}
+
 static void sta_watchdog_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
 
-    if (s_active_mode == ESPIRATE_WIFI_MODE_STA && !s_sta_connected) {
-        LOG_WRN("Station connection to '%s' timed out (15s). Falling back to Soft-AP mode (%s)...",
-                s_sta_ssid, s_ap_ssid);
-        stop_sta_mode();
-        start_ap_mode();
+    if (s_active_mode == ESPIRATE_WIFI_MODE_STA && s_sta_connecting && !s_sta_connected) {
+        if (s_sta_retry_pending) {
+            return;
+        }
+        LOG_WRN("Station connection attempt (%u/%u) timed out (%ds).",
+                s_sta_retry_count, STA_MAX_RETRIES, STA_WATCHDOG_TIMEOUT_SEC);
+        trigger_sta_retry();
     }
 }
 
@@ -330,20 +398,34 @@ static void wifi_mgmt_event_handler(struct net_mgmt_event_callback *cb,
         const struct wifi_status *status = (const struct wifi_status *)cb->info;
         if (status && status->status == 0) {
             LOG_INF("Wi-Fi Station connected to '%s'. Awaiting DHCPv4 lease...", s_sta_ssid);
+            k_work_reschedule(&s_sta_watchdog, K_SECONDS(STA_WATCHDOG_TIMEOUT_SEC));
         } else {
             LOG_WRN("Wi-Fi Station connection attempt failed (%d)", status ? status->status : -1);
-            if (s_active_mode == ESPIRATE_WIFI_MODE_STA) {
-                k_work_reschedule(&s_sta_watchdog, K_MSEC(3000));
+            if (s_active_mode == ESPIRATE_WIFI_MODE_STA && s_sta_connecting && !s_sta_connected) {
+                trigger_sta_retry();
             }
         }
         break;
     }
 
-    case NET_EVENT_WIFI_DISCONNECT_RESULT:
+    case NET_EVENT_WIFI_DISCONNECT_RESULT: {
         LOG_INF("Wi-Fi Station disconnected.");
+        bool was_connected = s_sta_connected;
         s_sta_connected = false;
         strcpy(s_sta_ip, "0.0.0.0");
+        if (s_active_mode == ESPIRATE_WIFI_MODE_STA) {
+            if (was_connected) {
+                LOG_WRN("Wi-Fi Station lost connection to '%s'. Starting reconnect sequence...", s_sta_ssid);
+                s_sta_connecting = true;
+                s_sta_retry_count = 0;
+                s_sta_retry_pending = false;
+                trigger_sta_retry();
+            } else if (s_sta_connecting) {
+                trigger_sta_retry();
+            }
+        }
         break;
+    }
 
     case NET_EVENT_IPV4_ADDR_ADD:
     case NET_EVENT_IPV4_DHCP_BOUND: {
@@ -357,7 +439,11 @@ static void wifi_mgmt_event_handler(struct net_mgmt_event_callback *cb,
                     if (strcmp(buf, "192.168.4.1") != 0 && strcmp(buf, "0.0.0.0") != 0) {
                         strncpy(s_sta_ip, buf, sizeof(s_sta_ip) - 1);
                         s_sta_connected = true;
+                        s_sta_connecting = false;
+                        s_sta_retry_count = 0;
+                        s_sta_retry_pending = false;
                         k_work_cancel_delayable(&s_sta_watchdog);
+                        k_work_cancel_delayable(&s_sta_retry_work);
                         LOG_INF("Station DHCP bound! IP Address: %s (mDNS: %s)",
                                 s_sta_ip, s_mdns_domain);
                         break;
@@ -420,6 +506,15 @@ static int start_ap_mode(void)
 
     LOG_INF("Starting Soft-AP Mode '%s'...", s_ap_ssid);
 
+    /* Clean up any existing unicast addresses before assigning AP IP */
+    if (s_iface && s_iface->config.ip.ipv4) {
+        for (int i = 0; i < NET_IF_MAX_IPV4_ADDR; i++) {
+            if (s_iface->config.ip.ipv4->unicast[i].ipv4.is_used) {
+                net_if_ipv4_addr_rm(s_iface, &s_iface->config.ip.ipv4->unicast[i].ipv4.address.in_addr);
+            }
+        }
+    }
+
     memset(&s_ap_config, 0, sizeof(s_ap_config));
     s_ap_config.ssid = (const uint8_t *)s_ap_ssid;
     s_ap_config.ssid_length = strlen(s_ap_ssid);
@@ -470,7 +565,6 @@ static int stop_ap_mode(void)
     s_sta_clients = 0;
     captive_dns_set_enabled(false);
 
-    k_msleep(200);
     return ret;
 }
 
@@ -493,7 +587,15 @@ static int start_sta_mode(void)
     strncpy(s_sta_ssid, saved_ssid, sizeof(s_sta_ssid) - 1);
     strncpy(s_sta_pass, saved_pass, sizeof(s_sta_pass) - 1);
 
-    LOG_INF("Starting Station Mode (connecting to '%s')...", s_sta_ssid);
+    s_sta_retry_count = 1;
+    s_sta_connecting = true;
+    s_sta_connected = false;
+    s_sta_retry_pending = false;
+    strcpy(s_sta_ip, "0.0.0.0");
+    s_active_mode = ESPIRATE_WIFI_MODE_STA;
+
+    LOG_INF("Starting Station Mode (connecting to '%s', attempt %u/%u)...",
+            s_sta_ssid, s_sta_retry_count, STA_MAX_RETRIES);
 
     memset(&s_sta_config, 0, sizeof(s_sta_config));
     s_sta_config.ssid = (const uint8_t *)s_sta_ssid;
@@ -510,18 +612,13 @@ static int start_sta_mode(void)
         s_sta_config.security = WIFI_SECURITY_TYPE_NONE;
     }
 
-    s_active_mode = ESPIRATE_WIFI_MODE_STA;
-    s_sta_connected = false;
-    strcpy(s_sta_ip, "0.0.0.0");
-
-    /* Schedule watchdog for 15 seconds to abort if unable to connect */
-    k_work_schedule(&s_sta_watchdog, K_SECONDS(15));
+    /* Schedule watchdog for timeout */
+    k_work_schedule(&s_sta_watchdog, K_SECONDS(STA_WATCHDOG_TIMEOUT_SEC));
 
     int ret = net_mgmt(NET_REQUEST_WIFI_CONNECT, s_iface, &s_sta_config, sizeof(s_sta_config));
     if (ret != 0) {
         LOG_ERR("NET_REQUEST_WIFI_CONNECT failed: %d", ret);
-        k_work_cancel_delayable(&s_sta_watchdog);
-        start_ap_mode();
+        trigger_sta_retry();
         return ret;
     }
 
@@ -535,14 +632,28 @@ static int stop_sta_mode(void)
     }
 
     k_work_cancel_delayable(&s_sta_watchdog);
+    k_work_cancel_delayable(&s_sta_retry_work);
+    s_sta_connecting = false;
+    s_sta_connected = false;
+    s_sta_retry_pending = false;
+    strcpy(s_sta_ip, "0.0.0.0");
 
     LOG_INF("Stopping Station Mode...");
     net_dhcpv4_stop(s_iface);
     int ret = net_mgmt(NET_REQUEST_WIFI_DISCONNECT, s_iface, NULL, 0);
-    s_sta_connected = false;
-    strcpy(s_sta_ip, "0.0.0.0");
 
-    k_msleep(200);
+    /* Explicitly stop ESP32 Wi-Fi driver so AP mode can start cleanly */
+    esp_wifi_stop();
+
+    /* Remove any unicast addresses on interface */
+    if (s_iface && s_iface->config.ip.ipv4) {
+        for (int i = 0; i < NET_IF_MAX_IPV4_ADDR; i++) {
+            if (s_iface->config.ip.ipv4->unicast[i].ipv4.is_used) {
+                net_if_ipv4_addr_rm(s_iface, &s_iface->config.ip.ipv4->unicast[i].ipv4.address.in_addr);
+            }
+        }
+    }
+
     return ret;
 }
 
@@ -559,6 +670,7 @@ int wifi_manager_init(void)
             s_hostname, s_mdns_domain);
 
     k_work_init_delayable(&s_sta_watchdog, sta_watchdog_handler);
+    k_work_init_delayable(&s_sta_retry_work, sta_retry_work_handler);
 
     net_mgmt_init_event_callback(&s_mgmt_cb, wifi_mgmt_event_handler, NET_EVENT_WIFI_ALL_MASK);
     net_mgmt_add_event_callback(&s_mgmt_cb);
@@ -587,7 +699,7 @@ int wifi_manager_init(void)
 
 int wifi_manager_set_mode(espirate_wifi_mode_t mode, bool save)
 {
-    if (mode == s_active_mode) {
+    if (mode == s_active_mode && (mode == ESPIRATE_WIFI_MODE_AP || s_sta_connected)) {
         if (save) save_configured_mode(mode);
         return 0;
     }
@@ -604,7 +716,11 @@ int wifi_manager_set_mode(espirate_wifi_mode_t mode, bool save)
             LOG_ERR("Cannot switch to STA mode: no credentials configured");
             return -ENOENT;
         }
-        stop_ap_mode();
+        if (s_ap_active) {
+            stop_ap_mode();
+        } else {
+            stop_sta_mode();
+        }
         int ret = start_sta_mode();
         if (ret == 0 && save) {
             save_configured_mode(ESPIRATE_WIFI_MODE_STA);
@@ -699,6 +815,10 @@ int wifi_manager_disconnect_sta(void)
 int wifi_manager_forget_sta(void)
 {
     k_work_cancel_delayable(&s_sta_watchdog);
+    k_work_cancel_delayable(&s_sta_retry_work);
+    s_sta_connecting = false;
+    s_sta_connected = false;
+    s_sta_retry_pending = false;
     s_sta_ssid[0] = '\0';
     s_sta_pass[0] = '\0';
     fs_unlink(WIFI_STA_FILE);
@@ -737,6 +857,16 @@ const char *wifi_manager_get_sta_ssid(void)
 const char *wifi_manager_get_sta_ip(void)
 {
     return s_sta_ip;
+}
+
+uint32_t wifi_manager_get_sta_retry_count(void)
+{
+    return s_sta_retry_count;
+}
+
+uint32_t wifi_manager_get_sta_max_retries(void)
+{
+    return STA_MAX_RETRIES;
 }
 
 const char *wifi_manager_get_hostname(void)
