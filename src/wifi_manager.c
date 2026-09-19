@@ -80,7 +80,7 @@ static espirate_wifi_mode_t s_configured_mode = ESPIRATE_WIFI_MODE_AP;
 
 static bool s_ap_active = false;
 static bool s_dhcp_srv_active = false;
-static char s_ap_ssid[33] = "ESPirateAP";
+static char s_ap_ssid[33] = "ESPirate-AP";
 static char s_ap_ip[16] = ESPIRATE_DEFAULT_IP;
 static uint32_t s_sta_clients = 0;
 
@@ -299,10 +299,23 @@ static void save_fake_internet_flag(bool enable)
     }
 }
 
+static void save_ap_ssid(const char *ssid)
+{
+    struct fs_file_t file;
+    fs_file_t_init(&file);
+    if (fs_open(&file, WIFI_AP_SSID_FILE, FS_O_CREATE | FS_O_WRITE) == 0) {
+        fs_write(&file, ssid, strlen(ssid));
+        fs_close(&file);
+    }
+}
+
 static void load_ap_ssid(void)
 {
-    /* Default AP SSID based on MAC: ESPirateXXYY */
-    snprintf(s_ap_ssid, sizeof(s_ap_ssid), "ESPirate%02X%02X", s_mac[4], s_mac[5]);
+    char old_default[33];
+    snprintf(old_default, sizeof(old_default), "ESPirate%02X%02X", s_mac[4], s_mac[5]);
+
+    /* Default AP SSID based on MAC: ESPirate-XXYY */
+    snprintf(s_ap_ssid, sizeof(s_ap_ssid), "ESPirate-%02X%02X", s_mac[4], s_mac[5]);
 
     struct fs_dirent entry;
     if (fs_stat(WIFI_AP_SSID_FILE, &entry) == 0) {
@@ -314,19 +327,14 @@ static void load_ap_ssid(void)
             fs_close(&file);
             if (r > 0) {
                 buf[r] = '\0';
-                strncpy(s_ap_ssid, buf, sizeof(s_ap_ssid) - 1);
+                /* If saved file matches legacy non-hyphenated default, upgrade it */
+                if (strcmp(buf, old_default) == 0) {
+                    save_ap_ssid(s_ap_ssid);
+                } else {
+                    strncpy(s_ap_ssid, buf, sizeof(s_ap_ssid) - 1);
+                }
             }
         }
-    }
-}
-
-static void save_ap_ssid(const char *ssid)
-{
-    struct fs_file_t file;
-    fs_file_t_init(&file);
-    if (fs_open(&file, WIFI_AP_SSID_FILE, FS_O_CREATE | FS_O_WRITE) == 0) {
-        fs_write(&file, ssid, strlen(ssid));
-        fs_close(&file);
     }
 }
 

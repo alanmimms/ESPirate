@@ -92,7 +92,7 @@ static const char ESPIRATE_DASHBOARD_HTML[] =
 "    </div>\n"
 "    <div style=\"font-size:0.8rem; color:#94a3b8; margin-bottom:0.25rem;\">Soft-AP Network SSID:</div>\n"
 "    <div class=\"btn-row\">\n"
-"      <input type=\"text\" id=\"wifi-ap-ssid\" placeholder=\"Soft-AP SSID (e.g. ESPirateCEA0)\" style=\"margin-bottom:0;\">\n"
+"      <input type=\"text\" id=\"wifi-ap-ssid\" placeholder=\"Soft-AP SSID (e.g. ESPirate-CEA0)\" style=\"margin-bottom:0;\">\n"
 "      <button onclick=\"saveApSsid()\">Save AP</button>\n"
 "    </div>\n"
 "    <div style=\"font-size:0.8rem; color:#94a3b8; margin-top:0.4rem; margin-bottom:0.25rem;\">Station (STA) Credentials:</div>\n"
