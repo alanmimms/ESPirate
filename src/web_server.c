@@ -31,6 +31,9 @@ LOG_MODULE_REGISTER(web_server, LOG_LEVEL_INF);
 K_THREAD_STACK_DEFINE(web_server_stack, 8192);
 static struct k_thread web_server_thread_data;
 static bool s_running = false;
+static int s_server_fd = -1;
+
+static void handle_api_status(int sock);
 
 static void send_http_response(int sock, int status_code, const char *content_type,
                                const char *body, size_t body_len)
@@ -516,16 +519,58 @@ static void handle_api_run(int sock, const char *body)
             send_http_response(sock, 500, "text/plain", "[Worker] Queue full or worker error.", 36);
         }
     } else {
-        int ret;
-        if (job.type == LUA_JOB_EVAL_FILE) {
-            ret = lua_worker_eval_file(job.payload, NULL);
-        } else {
-            ret = lua_worker_eval(job.payload, NULL);
+        struct k_sem done_sem;
+        k_sem_init(&done_sem, 0, 1);
+        int result = 0;
+        job.done_sem = &done_sem;
+        job.result_out = &result;
+
+        int ret = lua_worker_submit_async(&job);
+        if (ret != 0) {
+            send_http_response(sock, 500, "text/plain", "Worker busy or queue full", 26);
+            return;
         }
-        if (ret == 0) {
+
+        while (k_sem_take(&done_sem, K_MSEC(50)) != 0) {
+            if (s_server_fd >= 0) {
+                struct zsock_pollfd pfd = {
+                    .fd = s_server_fd,
+                    .events = ZSOCK_POLLIN,
+                };
+                if (zsock_poll(&pfd, 1, 0) > 0) {
+                    struct sockaddr_in ca;
+                    socklen_t calen = sizeof(ca);
+                    int new_fd = zsock_accept(s_server_fd, (struct sockaddr *)&ca, &calen);
+                    if (new_fd >= 0) {
+                        char qbuf[512] = {0};
+                        ssize_t n = zsock_recv(new_fd, qbuf, sizeof(qbuf) - 1, 0);
+                        if (n > 0) {
+                            qbuf[n] = '\0';
+                            if (strstr(qbuf, "/api/lua/stop") || strstr(qbuf, "/api/stop") || strstr(qbuf, "/api/abort")) {
+                                lua_manager_interrupt();
+                                const char resp[] = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 42\r\nConnection: close\r\n\r\n{\"status\":\"ok\",\"action\":\"stop\",\"interrupted\":true}";
+                                zsock_send(new_fd, resp, sizeof(resp) - 1, 0);
+                            } else if (strstr(qbuf, "/api/status")) {
+                                handle_api_status(new_fd);
+                            } else {
+                                const char busy_resp[] = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 11\r\nConnection: close\r\n\r\nServer Busy";
+                                zsock_send(new_fd, busy_resp, sizeof(busy_resp) - 1, 0);
+                            }
+                        }
+                        zsock_close(new_fd);
+                    }
+                }
+            }
+        }
+
+        if (result == 0) {
             send_http_response(sock, 200, "text/plain", "Execution completed successfully.", 33);
         } else {
-            send_http_response(sock, 500, "text/plain", "Execution error.", 16);
+            if (lua_manager_is_interrupted()) {
+                send_http_response(sock, 200, "text/plain", "Execution interrupted by user.", 30);
+            } else {
+                send_http_response(sock, 500, "text/plain", "Execution error.", 16);
+            }
         }
     }
 }
@@ -868,6 +913,7 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
         LOG_ERR("Failed to create TCP socket: %d", errno);
         return;
     }
+    s_server_fd = server_fd;
 
     int opt = 1;
     zsock_setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -1074,6 +1120,16 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
                     handle_api_storage_format(client_fd);
                 } else if (strcmp(clean_path, "/api/run") == 0) {
                     handle_api_run(client_fd, body);
+                } else if (strcmp(clean_path, "/api/lua/stop") == 0 ||
+                           strcmp(clean_path, "/api/stop") == 0 ||
+                           strcmp(clean_path, "/api/abort") == 0) {
+                    bool was_busy = lua_worker_is_busy();
+                    lua_manager_interrupt();
+                    char resp[128];
+                    int rlen = snprintf(resp, sizeof(resp),
+                                        "{\"status\":\"ok\",\"action\":\"stop\",\"worker_busy\":%s}",
+                                        was_busy ? "true" : "false");
+                    send_http_response(client_fd, 200, "application/json", resp, rlen);
                 } else {
                     send_http_response(client_fd, 404, "text/plain", "Not Found", 9);
                 }

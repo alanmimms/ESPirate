@@ -1324,6 +1324,16 @@ static int cmd_lua(const struct shell *sh, size_t argc, char **argv)
         return ret;
     }
 
+    if (argc >= 2 && (strcmp(argv[1], "stop") == 0 || strcmp(argv[1], "abort") == 0)) {
+        if (!lua_worker_is_busy()) {
+            shell_print(sh, "No Lua script is currently running.");
+            return 0;
+        }
+        shell_print(sh, "Stopping running Lua script...");
+        lua_manager_interrupt();
+        return 0;
+    }
+
     if (argc >= 3 && strcmp(argv[1], "run") == 0) {
         return lua_worker_eval_file(argv[2], sh);
     }
@@ -1371,7 +1381,23 @@ static int cmd_lua(const struct shell *sh, size_t argc, char **argv)
     return lua_worker_eval(cmd_buf, sh);
 }
 
-SHELL_CMD_REGISTER(lua, NULL, "Execute Lua code: lua \"<code>\" | lua run <file> | lua status | lua reset", cmd_lua);
+static int cmd_lua_stop(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    if (!lua_worker_is_busy()) {
+        shell_print(sh, "No Lua script is currently running.");
+        return 0;
+    }
+    shell_print(sh, "Stopping running Lua script...");
+    lua_manager_interrupt();
+    return 0;
+}
+
+SHELL_CMD_REGISTER(lua, NULL, "Execute Lua code: lua \"<code>\" | lua run <file> | lua bg <file/code> | lua stop | lua status | lua reset", cmd_lua);
+SHELL_CMD_REGISTER(abort, NULL, "Interrupt and stop running Lua script", cmd_lua_stop);
+SHELL_CMD_REGISTER(stop, NULL, "Interrupt and stop running Lua script", cmd_lua_stop);
 
 void espirate_shell_init(void)
 {

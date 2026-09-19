@@ -26,6 +26,7 @@ typedef struct {
     const struct shell *sh;
     struct k_sem *done_sem;
     int result;
+    int *result_out;
 } lua_job_t;
 
 /**
@@ -68,6 +69,11 @@ int lua_worker_submit_async(const lua_job_t *job);
  * @return true if busy, false if idle.
  */
 bool lua_worker_is_busy(void);
+
+/**
+ * @brief Wake up the Lua worker thread immediately if it is sleeping.
+ */
+void lua_worker_interrupt(void);
 
 #ifdef __cplusplus
 }

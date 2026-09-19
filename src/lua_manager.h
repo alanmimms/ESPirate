@@ -75,6 +75,18 @@ size_t lua_manager_get_memory_kb(void);
  */
 bool lua_manager_is_ready(void);
 
+/**
+ * @brief Request immediate interruption of any running Lua execution.
+ * @return 0 on success.
+ */
+int lua_manager_interrupt(void);
+
+/**
+ * @brief Check if execution interruption has been requested.
+ * @return true if interrupted, false otherwise.
+ */
+bool lua_manager_is_interrupted(void);
+
 #ifdef __cplusplus
 }
 #endif

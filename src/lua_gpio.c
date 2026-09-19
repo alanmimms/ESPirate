@@ -20,6 +20,7 @@
 #include "hw_i2c.h"
 #include "hw_spi.h"
 #include "lua_gpio.h"
+#include "lua_manager.h"
 
 LOG_MODULE_REGISTER(lua_gpio, LOG_LEVEL_INF);
 
@@ -732,14 +733,28 @@ static const luaL_Reg spi_funcs[] = {
 static int l_sys_sleep(lua_State *L)
 {
     int ms = (int)luaL_checkinteger(L, 1);
-    if (ms > 0) {
-        k_msleep(ms);
+    while (ms > 0) {
+        if (lua_manager_is_interrupted()) {
+            luaL_error(L, "interrupted by user");
+            return 0;
+        }
+        int chunk = (ms > 50) ? 50 : ms;
+        int rem = k_msleep(chunk);
+        if (rem > 0 || lua_manager_is_interrupted()) {
+            luaL_error(L, "interrupted by user");
+            return 0;
+        }
+        ms -= chunk;
     }
     return 0;
 }
 
 static int l_sys_usleep(lua_State *L)
 {
+    if (lua_manager_is_interrupted()) {
+        luaL_error(L, "interrupted by user");
+        return 0;
+    }
     int us = (int)luaL_checkinteger(L, 1);
     if (us > 0) {
         k_busy_wait(us);

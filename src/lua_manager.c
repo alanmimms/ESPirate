@@ -15,6 +15,7 @@
 
 #include "lua_manager.h"
 #include "lua_gpio.h"
+#include "lua_worker.h"
 #if CONFIG_SHARED_MULTI_HEAP
 #include <zephyr/multi_heap/shared_multi_heap.h>
 #endif
@@ -24,6 +25,29 @@ LOG_MODULE_REGISTER(lua_manager, LOG_LEVEL_INF);
 static lua_State *L = NULL;
 static const struct shell *eval_shell = NULL;
 K_MUTEX_DEFINE(lua_lock);
+static atomic_t s_interrupted = ATOMIC_INIT(0);
+
+static void lua_stop_hook(lua_State *L_state, lua_Debug *ar)
+{
+    ARG_UNUSED(ar);
+    lua_sethook(L_state, NULL, 0, 0);
+    luaL_error(L_state, "interrupted by user");
+}
+
+bool lua_manager_is_interrupted(void)
+{
+    return (atomic_get(&s_interrupted) != 0);
+}
+
+int lua_manager_interrupt(void)
+{
+    atomic_set(&s_interrupted, 1);
+    if (L) {
+        lua_sethook(L, lua_stop_hook, LUA_MASKCOUNT, 1);
+    }
+    lua_worker_interrupt();
+    return 0;
+}
 
 static int l_zephyr_print(lua_State *L_state)
 {
@@ -247,19 +271,31 @@ int lua_manager_eval(const char *code, const struct shell *sh)
         return -ENODEV;
     }
 
+    atomic_set(&s_interrupted, 0);
+    lua_sethook(L, NULL, 0, 0);
+
     eval_shell = sh;
     int ret = luaL_dostring(L, code);
+    lua_sethook(L, NULL, 0, 0);
+
     if (ret != LUA_OK) {
+        bool was_interrupted = lua_manager_is_interrupted();
         const char *err_msg = lua_tostring(L, -1);
         if (eval_shell) {
             shell_error(eval_shell, "Lua Error: %s", err_msg ? err_msg : "unknown error");
         } else {
             printk("Lua Error: %s\n", err_msg ? err_msg : "unknown error");
         }
+        if (was_interrupted) {
+            k_mutex_lock(&s_telemetry_mutex, K_FOREVER);
+            strncpy(s_telemetry.last_status, "INTERRUPTED", sizeof(s_telemetry.last_status) - 1);
+            s_telemetry.last_status[sizeof(s_telemetry.last_status) - 1] = '\0';
+            k_mutex_unlock(&s_telemetry_mutex);
+        }
         lua_pop(L, 1);
         eval_shell = NULL;
         k_mutex_unlock(&lua_lock);
-        return -EFAULT;
+        return was_interrupted ? -EINTR : -EFAULT;
     }
 
     eval_shell = NULL;
@@ -280,19 +316,31 @@ int lua_manager_eval_file(const char *path, const struct shell *sh)
         return -ENODEV;
     }
 
+    atomic_set(&s_interrupted, 0);
+    lua_sethook(L, NULL, 0, 0);
+
     eval_shell = sh;
     int ret = luaL_dofile(L, path);
+    lua_sethook(L, NULL, 0, 0);
+
     if (ret != LUA_OK) {
+        bool was_interrupted = lua_manager_is_interrupted();
         const char *err_msg = lua_tostring(L, -1);
         if (eval_shell) {
             shell_error(eval_shell, "Lua Error [%s]: %s", path, err_msg ? err_msg : "unknown error");
         } else {
             printk("Lua Error [%s]: %s\n", path, err_msg ? err_msg : "unknown error");
         }
+        if (was_interrupted) {
+            k_mutex_lock(&s_telemetry_mutex, K_FOREVER);
+            strncpy(s_telemetry.last_status, "INTERRUPTED", sizeof(s_telemetry.last_status) - 1);
+            s_telemetry.last_status[sizeof(s_telemetry.last_status) - 1] = '\0';
+            k_mutex_unlock(&s_telemetry_mutex);
+        }
         lua_pop(L, 1);
         eval_shell = NULL;
         k_mutex_unlock(&lua_lock);
-        return -EFAULT;
+        return was_interrupted ? -EINTR : -EFAULT;
     }
 
     eval_shell = NULL;
@@ -303,6 +351,7 @@ int lua_manager_eval_file(const char *path, const struct shell *sh)
 int lua_manager_reset(void)
 {
     k_mutex_lock(&lua_lock, K_FOREVER);
+    atomic_set(&s_interrupted, 0);
     if (L) {
         lua_close(L);
         L = NULL;
@@ -314,19 +363,17 @@ int lua_manager_reset(void)
 
 size_t lua_manager_get_memory_kb(void)
 {
-    k_mutex_lock(&lua_lock, K_FOREVER);
-    size_t kb = 0;
-    if (L) {
-        kb = (size_t)lua_gc(L, LUA_GCCOUNT, 0);
+    static size_t last_kb = 0;
+    if (k_mutex_lock(&lua_lock, K_MSEC(10)) == 0) {
+        if (L) {
+            last_kb = (size_t)lua_gc(L, LUA_GCCOUNT, 0);
+        }
+        k_mutex_unlock(&lua_lock);
     }
-    k_mutex_unlock(&lua_lock);
-    return kb;
+    return last_kb;
 }
 
 bool lua_manager_is_ready(void)
 {
-    k_mutex_lock(&lua_lock, K_FOREVER);
-    bool ready = (L != NULL);
-    k_mutex_unlock(&lua_lock);
-    return ready;
+    return (L != NULL);
 }

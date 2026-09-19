@@ -124,6 +124,7 @@ textarea { height: 160px; resize: vertical; }
       <div class="btn-row">
         <button class="success" onclick="runScript(true)">▶ Run (Background)</button>
         <button onclick="runScript(false)">Run (Sync)</button>
+        <button class="danger" onclick="stopScript()">⏹ Stop / Abort</button>
       </div>
       <div class="console" id="run-console">System ready. Select a script to execute.</div>
     </div>
@@ -160,6 +161,7 @@ textarea { height: 160px; resize: vertical; }
       <div class="btn-row">
         <input type="text" id="lua-eval-input" placeholder="e.g. gpio.high(4) or print(sys.uptime())" style="margin-bottom:0;" onkeydown="if(event.key==='Enter')evalLua()">
         <button onclick="evalLua()">⚡ Eval</button>
+        <button class="danger" onclick="stopScript()">⏹ Stop</button>
       </div>
       <div class="console" id="eval-console">Interactive Lua console ready.</div>
     </div>
@@ -480,6 +482,24 @@ async function evalLua() {
   });
   const txt = await res.text();
   log('eval-console', txt);
+}
+
+async function stopScript() {
+  log('run-console', '[Abort] Requesting Lua script interruption...');
+  log('eval-console', '[Abort] Requesting Lua script interruption...');
+  try {
+    const res = await fetch('/api/lua/stop', { method: 'POST' });
+    if (res.ok) {
+      const data = await res.json();
+      log('run-console', '[Abort] Interrupted! (script was running: ' + data.worker_busy + ')');
+      log('eval-console', '[Abort] Interrupted! (script was running: ' + data.worker_busy + ')');
+    } else {
+      log('run-console', '[Abort] Error sending stop request.');
+      log('eval-console', '[Abort] Error sending stop request.');
+    }
+  } catch (e) {
+    log('run-console', '[Abort] Network error: ' + e);
+  }
 }
 
 setInterval(fetchTelemetry, 1000);

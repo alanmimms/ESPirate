@@ -274,11 +274,47 @@ curl -s -X POST http://espirate-cea0.local/api/run \
   -d '{"file": "/lfs/demo.lua", "bg": true}'
 ```
 
+### Interrupting & Aborting Running Scripts
+
+If a script runs too long or enters an infinite loop (e.g. `while true do ... end`), it can be immediately interrupted and stopped without crashing the Zephyr RTOS, rebooting the device, or corrupting Lua VM memory:
+
+#### 1. Via UART Shell
+* **Foreground Execution**: If you launched a script synchronously with `lua "<code>"` or `lua run <file>`, press **`Ctrl+C`** or **`ESC`** in the terminal. The shell interface detects the keystroke, arms Lua's instruction hook, immediately wakes up any `sys.sleep()` delay, unwinds the Lua call stack, and returns you directly to the `ESPirate>` prompt:
+  ```text
+  ESPirate> lua "while true do sys.sleep(1000) end"
+  ^C (aborting Lua script...)
+  Lua Error: interrupted by user
+  ESPirate>
+  ```
+* **Background Execution or Standalone Command**: If a script is running on the worker thread (e.g. started via `lua bg ...`, REST API, or Web UI), run any of the following commands at the shell prompt:
+  ```bash
+  ESPirate> lua stop
+  # or:
+  ESPirate> abort
+  # or:
+  ESPirate> stop
+  ```
+
+#### 2. Via REST API (cURL)
+Send an HTTP POST request to `/api/lua/stop` (or alias `/api/stop` / `/api/abort`):
+```bash
+curl -s -X POST http://espirate-cea0.local/api/lua/stop
+```
+Response:
+```json
+{"status":"ok","action":"stop","worker_busy":true}
+```
+If a synchronous execution was waiting via `POST /api/run` (`"bg": false`), its connection immediately returns `Execution interrupted by user.`.
+
+#### 3. Via Web Dashboard
+Click the red **⏹ Stop / Abort** button located in the **Sequencer Execution** panel or the **Interactive Lua REPL** panel. The UI sends an interruption signal, logs the abort to the on-screen console, and updates the telemetry status badge to `INTERRUPTED`.
+
 ### System & Telemetry Endpoints
 * `GET /api/status`: Subsystem status, heap usage, Wi-Fi connectivity, LittleFS mount.
-* `GET /api/telemetry`: Hardware test metrics (total, passed, failed cycles).
+* `GET /api/telemetry`: Hardware test metrics (total, passed, failed cycles, last status).
 * `POST /api/telemetry/reset`: Reset test counters.
 * `POST /api/reset`: Reset Lua VM state.
+* `POST /api/lua/stop` (or `/api/stop`, `/api/abort`): Immediately stop running Lua script.
 
 ---
 

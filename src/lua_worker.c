@@ -57,6 +57,10 @@ static void lua_worker_thread_fn(void *arg1, void *arg2, void *arg3)
 
         atomic_set(&worker_busy, 0);
 
+        if (job.result_out) {
+            *job.result_out = job.result;
+        }
+
         if (job.done_sem) {
             k_sem_give(job.done_sem);
         }
@@ -83,6 +87,24 @@ int lua_worker_init(void)
     return 0;
 }
 
+static void lua_worker_wait_job(struct k_sem *done_sem, const struct shell *sh)
+{
+    while (k_sem_take(done_sem, K_MSEC(50)) != 0) {
+        if (sh && sh->iface && sh->iface->api && sh->iface->api->read) {
+            uint8_t rx_buf[16];
+            size_t cnt = 0;
+            sh->iface->api->read(sh->iface, rx_buf, sizeof(rx_buf), &cnt);
+            for (size_t i = 0; i < cnt; i++) {
+                if (rx_buf[i] == 0x03 || rx_buf[i] == 0x1B) { /* Ctrl+C or ESC */
+                    shell_print(sh, "^C (aborting Lua script...)");
+                    lua_manager_interrupt();
+                    break;
+                }
+            }
+        }
+    }
+}
+
 int lua_worker_eval(const char *code, const struct shell *sh)
 {
     if (!code) {
@@ -91,12 +113,14 @@ int lua_worker_eval(const char *code, const struct shell *sh)
 
     struct k_sem done_sem;
     k_sem_init(&done_sem, 0, 1);
+    int result = 0;
 
     lua_job_t job = {
         .type = LUA_JOB_EVAL_STRING,
         .sh = sh,
         .done_sem = &done_sem,
         .result = 0,
+        .result_out = &result,
     };
     strncpy(job.payload, code, sizeof(job.payload) - 1);
     job.payload[sizeof(job.payload) - 1] = '\0';
@@ -109,8 +133,8 @@ int lua_worker_eval(const char *code, const struct shell *sh)
         return rc;
     }
 
-    k_sem_take(&done_sem, K_FOREVER);
-    return job.result;
+    lua_worker_wait_job(&done_sem, sh);
+    return result;
 }
 
 int lua_worker_eval_file(const char *path, const struct shell *sh)
@@ -121,12 +145,14 @@ int lua_worker_eval_file(const char *path, const struct shell *sh)
 
     struct k_sem done_sem;
     k_sem_init(&done_sem, 0, 1);
+    int result = 0;
 
     lua_job_t job = {
         .type = LUA_JOB_EVAL_FILE,
         .sh = sh,
         .done_sem = &done_sem,
         .result = 0,
+        .result_out = &result,
     };
     strncpy(job.payload, path, sizeof(job.payload) - 1);
     job.payload[sizeof(job.payload) - 1] = '\0';
@@ -139,20 +165,22 @@ int lua_worker_eval_file(const char *path, const struct shell *sh)
         return rc;
     }
 
-    k_sem_take(&done_sem, K_FOREVER);
-    return job.result;
+    lua_worker_wait_job(&done_sem, sh);
+    return result;
 }
 
 int lua_worker_reset(void)
 {
     struct k_sem done_sem;
     k_sem_init(&done_sem, 0, 1);
+    int result = 0;
 
     lua_job_t job = {
         .type = LUA_JOB_RESET,
         .sh = NULL,
         .done_sem = &done_sem,
         .result = 0,
+        .result_out = &result,
     };
 
     int rc = k_msgq_put(&lua_worker_msgq, &job, K_MSEC(1000));
@@ -161,7 +189,7 @@ int lua_worker_reset(void)
     }
 
     k_sem_take(&done_sem, K_FOREVER);
-    return job.result;
+    return result;
 }
 
 int lua_worker_submit_async(const lua_job_t *job)
@@ -176,3 +204,11 @@ bool lua_worker_is_busy(void)
 {
     return (atomic_get(&worker_busy) != 0);
 }
+
+void lua_worker_interrupt(void)
+{
+    if (is_initialized) {
+        k_wakeup(&lua_worker_thread);
+    }
+}
+
