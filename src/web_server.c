@@ -33,7 +33,8 @@ static void send_http_response(int sock, int status_code, const char *content_ty
 {
     char hdr[256];
     const char *status_str = "OK";
-    if (status_code == 204) status_str = "No Content";
+    if (status_code == 200) status_str = "OK";
+    else if (status_code == 204) status_str = "No Content";
     else if (status_code == 400) status_str = "Bad Request";
     else if (status_code == 404) status_str = "Not Found";
     else if (status_code == 405) status_str = "Method Not Allowed";
@@ -47,9 +48,24 @@ static void send_http_response(int sock, int status_code, const char *content_ty
         "Connection: close\r\n\r\n",
         status_code, status_str, content_type, body_len);
 
-    zsock_send(sock, hdr, hdr_len, 0);
+    ssize_t ret = zsock_send(sock, hdr, hdr_len, 0);
+    if (ret <= 0) {
+        return;
+    }
+
     if (body && body_len > 0) {
-        zsock_send(sock, body, body_len, 0);
+        size_t sent_total = 0;
+        while (sent_total < body_len) {
+            size_t chunk = body_len - sent_total;
+            if (chunk > 1024) {
+                chunk = 1024;
+            }
+            ret = zsock_send(sock, body + sent_total, chunk, 0);
+            if (ret <= 0) {
+                break;
+            }
+            sent_total += ret;
+        }
     }
 }
 
@@ -430,6 +446,13 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
             k_msleep(50);
             continue;
         }
+
+        struct timeval tv = {
+            .tv_sec = 2,
+            .tv_usec = 0,
+        };
+        zsock_setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        zsock_setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
         ssize_t received = zsock_recv(client_fd, req_buf, sizeof(req_buf) - 1, 0);
         if (received > 0) {

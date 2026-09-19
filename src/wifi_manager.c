@@ -11,6 +11,7 @@
 #include <zephyr/net/dhcpv4_server.h>
 #include <zephyr/net/dhcpv4.h>
 #include <zephyr/net/hostname.h>
+#include <zephyr/net/igmp.h>
 #include <zephyr/fs/fs.h>
 #include <esp_mac.h>
 #include <esp_wifi.h>
@@ -573,6 +574,10 @@ static void ipv4_mgmt_event_handler(struct net_mgmt_event_callback *cb,
                         k_work_cancel_delayable(&s_sta_retry_work);
                         LOG_INF("Station DHCP bound! IP Address: %s (mDNS: %s)",
                                 s_sta_ip, s_mdns_domain);
+                        struct in_addr mdns_mcast;
+                        net_addr_pton(AF_INET, "224.0.0.251", &mdns_mcast);
+                        int igmp_ret = net_ipv4_igmp_join(s_iface, &mdns_mcast, NULL);
+                        LOG_INF("Joined mDNS multicast group 224.0.0.251 (ret=%d)", igmp_ret);
                         break;
                     }
                 }
