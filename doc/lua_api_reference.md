@@ -44,69 +44,119 @@ Lua scripts can be executed via three interfaces:
 
 ## 2. GPIO Subsystem (`gpio`)
 
-The `gpio` library provides direct digital I/O control across all available ESP32-S3 GPIO pins (GPIO 0 to 48, excluding internal flash/PSRAM pins).
+The `gpio` library provides complete digital I/O sensing, output assertion/deassertion, tristate mode, hardware pull-up/pull-down control, and safety-guarded pin discovery across all accessible ESP32-S3 GPIO pins.
 
-### `gpio.mode(pin, mode)`
-Configures the direction and electrical characteristics of a GPIO pin.
+### Safety Guards & Protected Pins
+To prevent hard faults, flash bus corruption, or loss of USB connectivity, ESPirate enforces hardware safety rules:
+* **Reserved Flash/PSRAM Pins (26–37):** Forbidden. Attempting to modify these pins raises an error (`"pin X is reserved for Octal SPI Flash/PSRAM bus"`).
+* **Reserved USB Pins (19, 20):** Forbidden. These lines carry native USB OTG (`D-`/`D+`) for the CDC-ACM console.
+* **Invalid Pins (22–25):** Not bonded on the ESP32-S3 silicon package.
+* **Safe, User-Accessible Pins:** 31 pins (`0–18`, `21`, `38–48`).
+
+---
+
+### Pin Discovery & Capability Inspection
+
+#### `gpio.info(pin)` / `gpio.caps(pin)`
+Returns a detailed capability and status table for any GPIO pad (0..48):
 * **Parameters:**
   * `pin` *(integer)*: GPIO number (0..48).
-  * `mode` *(string)*:
-    * `"out"` or `"output"`: Digital output (with input buffer enabled for state readback).
-    * `"in"` or `"input"`: Digital input (high impedance, floating).
-    * `"in_pullup"` or `"pullup"`: Digital input with internal pull-up resistor (~45 kΩ).
-    * `"in_pulldown"` or `"pulldown"`: Digital input with internal pull-down resistor (~45 kΩ).
-    * `"open_drain"`: Open-drain output with input buffer enabled.
-* **Returns:** `true` on success, or raises a Lua error.
+* **Returns:** *(table)* with fields:
+  * `pin` *(integer)*: GPIO number.
+  * `valid` *(boolean)*: `true` if pin physically exists on the chip.
+  * `reserved` *(boolean)*: `true` if hardware-reserved (USB, Flash, PSRAM).
+  * `input` *(boolean)*: `true` if digital input is supported.
+  * `output` *(boolean)*: `true` if digital output is supported.
+  * `pullup` *(boolean)*: `true` if internal hardware pull-up is available.
+  * `pulldown` *(boolean)*: `true` if internal hardware pull-down is available.
+  * `analog` *(boolean)*: `true` if ADC channel is present.
+  * `adc` *(string or nil)*: ADC channel identifier (e.g. `"ADC1_CH9"`).
+  * `desc` *(string)*: Human-readable functional description.
 * **Example:**
   ```lua
-  gpio.mode(10, "out")
-  gpio.mode(11, "in_pullup")
+  local i = gpio.info(10)
+  print(i.desc, "ADC:", i.adc)
   ```
 
-### `gpio.write(pin, value)`
+#### `gpio.list()` / `gpio.pins()`
+Returns an array of all safe, user-accessible GPIO numbers.
+* **Returns:** *(table)* e.g. `{0, 1, 2, ..., 18, 21, 38, ..., 48}`.
+
+---
+
+### Pin Mode & Pull Configuration
+
+#### `gpio.mode(pin, mode, [pull])`
+Configures the direction, electrical driver, and optional pull state of a GPIO pin.
+* **Parameters:**
+  * `pin` *(integer)*: GPIO number.
+  * `mode` *(string)*:
+    * `"in"` or `"input"`: Digital input (floating/high impedance).
+    * `"out"` or `"output"`: Digital output (with readback buffer enabled).
+    * `"open_drain"` or `"od"`: Open-drain output (active low / floating high).
+    * `"tristate"` / `"hiz"` / `"disconnected"`: True high-impedance mode (output driver and input buffer disabled).
+    * Composite shortcuts: `"in_pullup"`, `"in_pulldown"`, `"out_pullup"`, `"out_pulldown"`, `"open_drain_pullup"`.
+  * `pull` *(string, optional)*:
+    * `"up"` / `"pullup"`: Enable internal pull-up (~45 kΩ).
+    * `"down"` / `"pulldown"`: Enable internal pull-down (~45 kΩ).
+    * `"none"` / `"floating"`: Disable pull resistors.
+* **Returns:** `true` on success, or raises a Lua error if the pin is reserved or invalid.
+* **Example:**
+  ```lua
+  gpio.mode(10, "in", "pullup")   -- Input with pull-up
+  gpio.mode(10, "out", "none")    -- Output (push-pull)
+  gpio.mode(10, "tristate")       -- High-impedance / disconnected
+  ```
+
+#### `gpio.pull(pin, pull_mode)`
+Independently configures internal hardware pull-up or pull-down without changing the pin's current direction.
+* **Parameters:**
+  * `pin` *(integer)*: GPIO number.
+  * `pull_mode` *(string)*: `"up"`, `"down"`, or `"none"` / `"floating"`.
+* **Returns:** `true` on success.
+* **Example:**
+  ```lua
+  gpio.pull(10, "up")
+  local val = gpio.read(10) -- senses 1
+  ```
+
+#### `gpio.tristate(pin)` / `gpio.hiz(pin)`
+Immediately places the pin into high-impedance (tristate) mode by disabling both the output driver and input buffer.
+* **Parameters:**
+  * `pin` *(integer)*: GPIO number.
+* **Returns:** `true` on success.
+
+#### `gpio.drive(pin, strength)`
+Configures the output pad current drive capability.
+* **Parameters:**
+  * `pin` *(integer)*: GPIO number.
+  * `strength` *(integer)*: Current limit in mA: `5`, `10`, `20` (default), or `40`.
+* **Returns:** `true` on success.
+
+---
+
+### Digital Input Sensing & Output Control
+
+#### `gpio.read(pin)` / `gpio.get(pin)`
+Reads the current digital logic level of a pin.
+* **Parameters:** `pin` *(integer)*
+* **Returns:** *(integer)* `1` (HIGH / 3.3V) or `0` (LOW / 0V).
+
+#### `gpio.write(pin, value)`
 Sets the logic state of an output pin.
 * **Parameters:**
   * `pin` *(integer)*: GPIO number.
-  * `value` *(integer)*: `1` for logic HIGH (3.3V), `0` for logic LOW (0V). Non-zero integers evaluate to HIGH.
-* **Returns:** `true` on success.
-* **Example:**
-  ```lua
-  gpio.write(10, 1) -- 3.3V
-  gpio.write(10, 0) -- 0V
-  ```
+  * `value` *(integer)*: `1` for logic HIGH (3.3V), `0` for logic LOW (0V).
 
-### `gpio.read(pin)`
-Reads the current digital logic level of a pin.
-* **Parameters:**
-  * `pin` *(integer)*: GPIO number.
-* **Returns:** *(integer)* `1` if HIGH, `0` if LOW.
-* **Example:**
-  ```lua
-  local level = gpio.read(11)
-  print("Button state:", level)
-  ```
+#### `gpio.high(pin)` / `gpio.set(pin)`
+Asserts the pin to logic HIGH (3.3V). Equivalent to `gpio.write(pin, 1)`.
 
-### `gpio.toggle(pin)`
-Inverts the current output state of a pin (HIGH becomes LOW, LOW becomes HIGH).
-* **Parameters:**
-  * `pin` *(integer)*: GPIO number.
-* **Returns:** `true` on success.
-* **Example:**
-  ```lua
-  gpio.toggle(10)
-  ```
+#### `gpio.low(pin)` / `gpio.clear(pin)`
+Deasserts the pin to logic LOW (0V). Equivalent to `gpio.write(pin, 0)`.
 
-### `gpio.high(pin)`
-Convenience helper to drive a pin HIGH (equivalent to `gpio.write(pin, 1)`).
-* **Parameters:**
-  * `pin` *(integer)*: GPIO number.
-* **Returns:** `true` on success.
+#### `gpio.toggle(pin)`
+Inverts the current output state of the pin.
 
-### `gpio.low(pin)`
-Convenience helper to drive a pin LOW (equivalent to `gpio.write(pin, 0)`).
-* **Parameters:**
-  * `pin` *(integer)*: GPIO number.
-* **Returns:** `true` on success.
 
 ---
 

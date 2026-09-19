@@ -22,7 +22,7 @@
 LOG_MODULE_REGISTER(web_server, LOG_LEVEL_INF);
 
 #define WEB_SERVER_PORT 80
-#define REQ_BUF_SIZE    4096
+#define REQ_BUF_SIZE    8192
 
 K_THREAD_STACK_DEFINE(web_server_stack, 8192);
 static struct k_thread web_server_thread_data;
@@ -322,7 +322,7 @@ static void handle_api_get_script(int sock, const char *path)
 static void handle_api_save_script(int sock, const char *body)
 {
     char name[128] = {0};
-    static char content[3072];
+    static char content[8192];
     memset(content, 0, sizeof(content));
 
     extract_json_str(body, "name", name, sizeof(name));
@@ -469,6 +469,27 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
         ssize_t received = zsock_recv(client_fd, req_buf, sizeof(req_buf) - 1, 0);
         if (received > 0) {
             req_buf[received] = '\0';
+
+            /* If Content-Length is present, receive full body across TCP segments */
+            char *cl = strstr(req_buf, "Content-Length:");
+            if (!cl) cl = strstr(req_buf, "content-length:");
+            if (cl) {
+                int content_len = atoi(cl + 15);
+                char *body_start = strstr(req_buf, "\r\n\r\n");
+                if (body_start && content_len > 0) {
+                    size_t header_len = (body_start + 4) - req_buf;
+                    size_t target_len = header_len + content_len;
+                    if (target_len > sizeof(req_buf) - 1) {
+                        target_len = sizeof(req_buf) - 1;
+                    }
+                    while (received < target_len) {
+                        ssize_t r = zsock_recv(client_fd, req_buf + received, target_len - received, 0);
+                        if (r <= 0) break;
+                        received += r;
+                    }
+                    req_buf[received] = '\0';
+                }
+            }
 
             char method[8] = {0};
             char path[128] = {0};
