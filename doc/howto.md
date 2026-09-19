@@ -58,6 +58,17 @@ Generated outputs under `build/zephyr/`:
 * `build/zephyr/zephyr.bin`: Raw flash binary image (~1 MB).
 * `build/zephyr/zephyr.elf`: ELF binary with debug symbols.
 
+### Web Dashboard UI Development (`web/index.html`)
+
+The ESPirate web dashboard frontend is maintained in [`web/index.html`](file:///home/alan/ha/ESPirate/web/index.html) as clean, standard HTML5/CSS/JavaScript.
+
+* **Automatic Generation**: CMake automatically converts `web/index.html` into a C header at build time using [`scripts/generate_web_dashboard.py`](file:///home/alan/ha/ESPirate/scripts/generate_web_dashboard.py).
+* **Incremental Recompilation**: Whenever `web/index.html` is edited, running `./scripts/build.sh` automatically regenerates `build/include/web_dashboard.h`, forces recompilation of `src/web_server.c`, and relinks the binary.
+* **Direct Script Execution**: You can also run the generator manually:
+  ```bash
+  python3 scripts/generate_web_dashboard.py web/index.html build/include/web_dashboard.h
+  ```
+
 ---
 
 ## 3. Flashing & Hardware Erase
