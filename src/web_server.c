@@ -447,6 +447,18 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
             continue;
         }
 
+        /* Wait up to 300ms for incoming data. If client socket is an idle browser pre-connect,
+         * close it immediately so we do not stall the single-threaded server. */
+        struct zsock_pollfd pfd = {
+            .fd = client_fd,
+            .events = ZSOCK_POLLIN,
+        };
+        int poll_ret = zsock_poll(&pfd, 1, 300);
+        if (poll_ret <= 0) {
+            zsock_close(client_fd);
+            continue;
+        }
+
         struct timeval tv = {
             .tv_sec = 2,
             .tv_usec = 0,
@@ -462,6 +474,27 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
             char path[128] = {0};
             sscanf(req_buf, "%7s %127s", method, path);
 
+            /* Normalize absolute URI (e.g. "http://192.168.0.56/path" -> "/path") */
+            char *req_path = path;
+            if (strncmp(req_path, "http://", 7) == 0) {
+                req_path = strchr(req_path + 7, '/');
+                if (!req_path) req_path = "/";
+            } else if (strncmp(req_path, "https://", 8) == 0) {
+                req_path = strchr(req_path + 8, '/');
+                if (!req_path) req_path = "/";
+            }
+
+            /* Strip query string for endpoint routing */
+            char clean_path[128];
+            strncpy(clean_path, req_path, sizeof(clean_path) - 1);
+            clean_path[sizeof(clean_path) - 1] = '\0';
+            char *qmark = strchr(clean_path, '?');
+            if (qmark) {
+                *qmark = '\0';
+            }
+
+            LOG_INF("HTTP %s %s", method, clean_path);
+
             /* Locate HTTP body (after \r\n\r\n) */
             char *body = strstr(req_buf, "\r\n\r\n");
             if (body) {
@@ -472,61 +505,64 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
 
             if (strcmp(method, "GET") == 0) {
                 /* Android 17 / Chrome 204 Probe */
-                if (strcmp(path, "/generate_204") == 0 || strcmp(path, "/gen_204") == 0 ||
-                    strstr(path, "generate_204") != NULL || strstr(path, "gen_204") != NULL) {
+                if (strcmp(clean_path, "/generate_204") == 0 || strcmp(clean_path, "/gen_204") == 0 ||
+                    strstr(clean_path, "generate_204") != NULL || strstr(clean_path, "gen_204") != NULL) {
                     send_http_response(client_fd, 204, "text/plain", NULL, 0);
                 }
-                /* Apple Captive Portal Detection */
-                else if (strcmp(path, "/hotspot-detect.html") == 0 ||
-                         strcmp(path, "/library/test/success.html") == 0) {
+                /* Favicon - 204 No Content for instant response */
+                else if (strcmp(clean_path, "/favicon.ico") == 0) {
+                    send_http_response(client_fd, 204, "image/x-icon", NULL, 0);
+                }
+                /* Microsoft NCSI Probes */
+                else if (strcmp(clean_path, "/ncsi.txt") == 0) {
+                    send_http_response(client_fd, 200, "text/plain", "Microsoft NCSI", 14);
+                } else if (strcmp(clean_path, "/connecttest.txt") == 0) {
+                    send_http_response(client_fd, 200, "text/plain", "Microsoft Connect Test", 22);
+                }
+                /* Apple Captive Portal Detection (only in AP mode with fake internet enabled) */
+                else if ((strcmp(clean_path, "/hotspot-detect.html") == 0 ||
+                          strcmp(clean_path, "/library/test/success.html") == 0) &&
+                         !wifi_manager_sta_is_connected() && wifi_manager_get_fake_internet()) {
                     const char apple_ok[] = "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>";
                     send_http_response(client_fd, 200, "text/html", apple_ok, sizeof(apple_ok) - 1);
                 }
-                /* Microsoft NCSI Probes */
-                else if (strcmp(path, "/ncsi.txt") == 0) {
-                    send_http_response(client_fd, 200, "text/plain", "Microsoft NCSI", 14);
-                } else if (strcmp(path, "/connecttest.txt") == 0) {
-                    send_http_response(client_fd, 200, "text/plain", "Microsoft Connect Test", 22);
-                }
                 /* Dashboard & API endpoints */
-                else if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0) {
+                else if (strcmp(clean_path, "/") == 0 || strcmp(clean_path, "/index.html") == 0) {
                     send_http_response(client_fd, 200, "text/html",
                                        ESPIRATE_DASHBOARD_HTML, sizeof(ESPIRATE_DASHBOARD_HTML) - 1);
-                } else if (strcmp(path, "/api/wifi") == 0) {
+                } else if (strcmp(clean_path, "/api/wifi") == 0) {
                     handle_api_wifi_get(client_fd);
-                } else if (strcmp(path, "/api/status") == 0) {
+                } else if (strcmp(clean_path, "/api/status") == 0) {
                     handle_api_status(client_fd);
-                } else if (strcmp(path, "/api/telemetry") == 0) {
+                } else if (strcmp(clean_path, "/api/telemetry") == 0) {
                     handle_api_telemetry(client_fd);
-                } else if (strcmp(path, "/api/scripts") == 0) {
+                } else if (strcmp(clean_path, "/api/scripts") == 0) {
                     handle_api_scripts_list(client_fd);
-                } else if (strncmp(path, "/api/script?", 12) == 0) {
-                    handle_api_get_script(client_fd, path);
-                } else if (wifi_manager_get_fake_internet()) {
-                    /* If fake internet is active, serve dashboard for any captive portal browser */
+                } else if (strncmp(clean_path, "/api/script", 11) == 0) {
+                    handle_api_get_script(client_fd, req_path);
+                } else {
+                    /* All other GET requests serve the dashboard so the user always sees the web page */
                     send_http_response(client_fd, 200, "text/html",
                                        ESPIRATE_DASHBOARD_HTML, sizeof(ESPIRATE_DASHBOARD_HTML) - 1);
-                } else {
-                    send_http_response(client_fd, 404, "text/plain", "Not Found", 9);
                 }
             } else if (strcmp(method, "POST") == 0) {
-                if (strcmp(path, "/api/wifi") == 0) {
+                if (strcmp(clean_path, "/api/wifi") == 0) {
                     handle_api_wifi_post(client_fd, body);
-                } else if (strcmp(path, "/api/wifi/mode") == 0) {
+                } else if (strcmp(clean_path, "/api/wifi/mode") == 0) {
                     handle_api_wifi_mode(client_fd, body);
-                } else if (strcmp(path, "/api/wifi/config") == 0) {
+                } else if (strcmp(clean_path, "/api/wifi/config") == 0) {
                     handle_api_wifi_config(client_fd, body);
-                } else if (strcmp(path, "/api/wifi/forget") == 0) {
+                } else if (strcmp(clean_path, "/api/wifi/forget") == 0) {
                     handle_api_wifi_forget(client_fd);
-                } else if (strcmp(path, "/api/telemetry/reset") == 0) {
+                } else if (strcmp(clean_path, "/api/telemetry/reset") == 0) {
                     espirate_telemetry_reset();
                     send_http_response(client_fd, 200, "application/json", "{\"status\":\"ok\"}", 15);
-                } else if (strcmp(path, "/api/reset") == 0) {
+                } else if (strcmp(clean_path, "/api/reset") == 0) {
                     lua_worker_reset();
                     send_http_response(client_fd, 200, "application/json", "{\"status\":\"reset\"}", 18);
-                } else if (strcmp(path, "/api/script") == 0) {
+                } else if (strcmp(clean_path, "/api/script") == 0) {
                     handle_api_save_script(client_fd, body);
-                } else if (strcmp(path, "/api/run") == 0) {
+                } else if (strcmp(clean_path, "/api/run") == 0) {
                     handle_api_run(client_fd, body);
                 } else {
                     send_http_response(client_fd, 404, "text/plain", "Not Found", 9);
