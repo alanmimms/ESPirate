@@ -971,7 +971,11 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
                 *qmark = '\0';
             }
 
-            LOG_INF("HTTP %s %s", method, clean_path);
+            if (strcmp(method, "GET") == 0) {
+                LOG_DBG("HTTP GET %s", clean_path);
+            } else {
+                LOG_INF("HTTP %s %s", method, clean_path);
+            }
 
             /* Locate HTTP body (after \r\n\r\n) */
             char *body = strstr(req_buf, "\r\n\r\n");
