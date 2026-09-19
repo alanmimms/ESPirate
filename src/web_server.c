@@ -415,9 +415,10 @@ static void handle_api_storage(int sock)
     char json[256];
     if (rc == 0) {
         size_t used = (total >= free_b) ? (total - free_b) : 0;
+        uint32_t chip_size = fs_manager_get_chip_size();
         int len = snprintf(json, sizeof(json),
-            "{\"mounted\":true,\"mount_point\":\"%s\",\"total_bytes\":%zu,\"free_bytes\":%zu,\"used_bytes\":%zu}",
-            ESPIRATE_FS_MOUNT_POINT, total, free_b, used);
+            "{\"mounted\":true,\"mount_point\":\"%s\",\"total_bytes\":%zu,\"free_bytes\":%zu,\"used_bytes\":%zu,\"chip_size_mb\":%u}",
+            ESPIRATE_FS_MOUNT_POINT, total, free_b, used, chip_size / (1024 * 1024));
         send_http_response(sock, 200, "application/json", json, len);
     } else {
         int len = snprintf(json, sizeof(json), "{\"mounted\":false,\"error\":%d}", rc);

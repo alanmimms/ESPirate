@@ -95,6 +95,18 @@ int fs_manager_list_files(fs_file_info_t *files, size_t max_files, size_t *count
  */
 void fs_manager_create_default_files(void);
 
+/**
+ * @brief Get detected physical SPI flash chip size in bytes.
+ * @return Detected physical size in bytes (e.g. 16777216 for 16MB), or 0 if undetected.
+ */
+uint32_t fs_manager_get_chip_size(void);
+
+/**
+ * @brief Get dynamically adapted LittleFS partition size in bytes.
+ * @return Partition size in bytes, or 0 if undetected.
+ */
+size_t fs_manager_get_partition_size(void);
+
 #ifdef __cplusplus
 }
 #endif

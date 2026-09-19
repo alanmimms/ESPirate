@@ -87,9 +87,26 @@ int fs_manager_init(void)
 
     /* Detect actual physical SPI Flash size (4MB, 8MB, 16MB, etc.) */
     uint32_t chip_size = 0;
-    esp_err_t sz_err = esp_flash_get_size(NULL, &chip_size);
-    if (sz_err == ESP_OK && chip_size > 0) {
+    esp_err_t sz_err = esp_flash_get_physical_size(NULL, &chip_size);
+    if (sz_err != ESP_OK || chip_size == 0) {
+        /* Fallback: read JEDEC ID directly (e.g. 0x684018 -> 1 << 0x18 = 16MB) */
+        uint32_t flash_id = 0;
+        if (esp_flash_read_id(NULL, &flash_id) == ESP_OK && flash_id > 0) {
+            uint8_t size_code = flash_id & 0xFF;
+            if (size_code >= 0x14 && size_code <= 0x21) { /* 1MB to 32MB */
+                chip_size = 1U << size_code;
+                LOG_INF("Derived physical flash size from JEDEC ID 0x%06x: %u MB (%u bytes)",
+                        flash_id, chip_size / (1024 * 1024), chip_size);
+            }
+        }
+    }
+
+    if (chip_size > 0) {
         s_detected_chip_size = chip_size;
+        /* Crucial: Update esp_flash_default_chip->size so ESP-IDF allows operations across full flash */
+        if (esp_flash_default_chip != NULL) {
+            esp_flash_default_chip->size = chip_size;
+        }
         LOG_INF("Detected physical SPI flash size: %u MB (%u bytes)",
                 chip_size / (1024 * 1024), chip_size);
 
@@ -116,7 +133,7 @@ int fs_manager_init(void)
             flash_map = s_dynamic_flash_map;
         }
     } else {
-        LOG_WRN("esp_flash_get_size returned %d, using static DTS partition size", sz_err);
+        LOG_WRN("Physical flash size detection returned %d, using static DTS partition size", sz_err);
     }
 
     int rc = fs_mount(&espirate_lfs_mount);
@@ -352,5 +369,15 @@ int fs_manager_list_files(fs_file_info_t *files, size_t max_files, size_t *count
         *count = n;
     }
     return 0;
+}
+
+uint32_t fs_manager_get_chip_size(void)
+{
+    return s_detected_chip_size;
+}
+
+size_t fs_manager_get_partition_size(void)
+{
+    return s_detected_partition_size;
 }
 

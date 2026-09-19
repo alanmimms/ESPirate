@@ -358,8 +358,10 @@ static int cmd_storage_status(const struct shell *sh, size_t argc, char **argv)
         return rc;
     }
 
-    uint32_t chip_size = 0;
-    esp_flash_get_size(NULL, &chip_size);
+    uint32_t chip_size = fs_manager_get_chip_size();
+    if (chip_size == 0) {
+        esp_flash_get_physical_size(NULL, &chip_size);
+    }
 
     size_t used = (total >= free_b) ? (total - free_b) : 0;
     shell_print(sh, "=== LittleFS Storage Subsystem ===");
