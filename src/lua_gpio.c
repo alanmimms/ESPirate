@@ -4,10 +4,9 @@
  */
 
 #include <zephyr/kernel.h>
-#include <zephyr/device.h>
-#include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
 #include <string.h>
+#include <stdio.h>
 
 #include <esp_rom_gpio.h>
 #include <soc/gpio_sig_map.h>
@@ -16,68 +15,18 @@
 #include <lauxlib.h>
 #include <lualib.h>
 
+#include "hw_gpio.h"
+#include "hw_pwm.h"
+#include "hw_i2c.h"
+#include "hw_spi.h"
 #include "lua_gpio.h"
 
 LOG_MODULE_REGISTER(lua_gpio, LOG_LEVEL_INF);
 
-static const struct device *gpio0_dev = DEVICE_DT_GET(DT_NODELABEL(gpio0));
-static const struct device *gpio1_dev = DEVICE_DT_GET(DT_NODELABEL(gpio1));
-
 int espirate_hw_gpio_init(void)
 {
-    if (!device_is_ready(gpio0_dev)) {
-        LOG_WRN("gpio0 device not ready");
-    }
-    if (!device_is_ready(gpio1_dev)) {
-        LOG_WRN("gpio1 device not ready");
-    }
-    return 0;
-}
-
-static gpio_flags_t s_pin_flags[49] = {0};
-
-static int check_pin_safety(int pin, const char **reason)
-{
-    if (pin < 0 || pin > 48) {
-        if (reason) *reason = "out of range (0..48)";
-        return -EINVAL;
-    }
-    if (pin >= 22 && pin <= 25) {
-        if (reason) *reason = "not bonded on ESP32-S3 silicon";
-        return -EINVAL;
-    }
-    if (pin == 19 || pin == 20) {
-        if (reason) *reason = "reserved for native USB OTG console (CDC-ACM)";
-        return -EPERM;
-    }
-    if (pin >= 26 && pin <= 32) {
-        if (reason) *reason = "reserved for Octal SPI Flash/PSRAM bus";
-        return -EPERM;
-    }
-    if (pin >= 33 && pin <= 37) {
-        if (reason) *reason = "reserved for Octal PSRAM data lines";
-        return -EPERM;
-    }
-    return 0;
-}
-
-static int get_gpio_port_and_pin(int pin, const struct device **dev_out, gpio_pin_t *pin_out)
-{
-    const char *reason = NULL;
-    int ret = check_pin_safety(pin, &reason);
-    if (ret != 0) {
-        return ret;
-    }
-    if (pin < 32) {
-        *dev_out = gpio0_dev;
-        *pin_out = (gpio_pin_t)pin;
-    } else {
-        *dev_out = gpio1_dev;
-        *pin_out = (gpio_pin_t)(pin - 32);
-    }
-    if (!device_is_ready(*dev_out)) {
-        return -ENODEV;
-    }
+    hw_gpio_init();
+    hw_pwm_init();
     return 0;
 }
 
@@ -92,62 +41,15 @@ static int l_gpio_mode(lua_State *L)
     const char *pull = lua_tostring(L, 3);
 
     const char *reason = NULL;
-    if (check_pin_safety(pin, &reason) != 0) {
+    if (hw_gpio_check_safety(pin, &reason) != 0) {
         return luaL_error(L, "pin %d is %s", pin, reason);
     }
 
-    const struct device *dev;
-    gpio_pin_t pin_idx;
-    int ret = get_gpio_port_and_pin(pin, &dev, &pin_idx);
+    int ret = hw_gpio_mode(pin, mode, pull);
     if (ret != 0) {
-        return luaL_error(L, "invalid pin %d", pin);
+        return luaL_error(L, "hw_gpio_mode failed: %d", ret);
     }
 
-    gpio_flags_t flags = GPIO_DISCONNECTED;
-    if (strcmp(mode, "out") == 0 || strcmp(mode, "output") == 0) {
-        flags = GPIO_OUTPUT | GPIO_INPUT;
-    } else if (strcmp(mode, "in") == 0 || strcmp(mode, "input") == 0) {
-        flags = GPIO_INPUT;
-    } else if (strcmp(mode, "in_pullup") == 0 || strcmp(mode, "pullup") == 0) {
-        flags = GPIO_INPUT | GPIO_PULL_UP;
-    } else if (strcmp(mode, "in_pulldown") == 0 || strcmp(mode, "pulldown") == 0) {
-        flags = GPIO_INPUT | GPIO_PULL_DOWN;
-    } else if (strcmp(mode, "out_pullup") == 0) {
-        flags = GPIO_OUTPUT | GPIO_INPUT | GPIO_PULL_UP;
-    } else if (strcmp(mode, "out_pulldown") == 0) {
-        flags = GPIO_OUTPUT | GPIO_INPUT | GPIO_PULL_DOWN;
-    } else if (strcmp(mode, "open_drain") == 0 || strcmp(mode, "od") == 0) {
-        flags = GPIO_OUTPUT | GPIO_INPUT | GPIO_OPEN_DRAIN;
-    } else if (strcmp(mode, "open_drain_pullup") == 0 || strcmp(mode, "od_pullup") == 0) {
-        flags = GPIO_OUTPUT | GPIO_INPUT | GPIO_OPEN_DRAIN | GPIO_PULL_UP;
-    } else if (strcmp(mode, "tristate") == 0 || strcmp(mode, "hiz") == 0 ||
-               strcmp(mode, "hi_z") == 0 || strcmp(mode, "disconnected") == 0 ||
-               strcmp(mode, "none") == 0) {
-        flags = GPIO_DISCONNECTED;
-    } else {
-        return luaL_error(L, "unknown mode '%s' (expected 'in', 'out', 'open_drain', 'tristate')", mode);
-    }
-
-    if (pull) {
-        flags &= ~(GPIO_PULL_UP | GPIO_PULL_DOWN);
-        if (strcmp(pull, "up") == 0 || strcmp(pull, "pullup") == 0) {
-            flags |= GPIO_PULL_UP;
-        } else if (strcmp(pull, "down") == 0 || strcmp(pull, "pulldown") == 0) {
-            flags |= GPIO_PULL_DOWN;
-        } else if (strcmp(pull, "none") == 0 || strcmp(pull, "floating") == 0 || strcmp(pull, "off") == 0) {
-            /* cleared */
-        } else {
-            return luaL_error(L, "unknown pull '%s' (expected 'up', 'down', 'none')", pull);
-        }
-    }
-
-    esp_rom_gpio_pad_select_gpio((uint32_t)pin);
-    ret = gpio_pin_configure(dev, pin_idx, flags);
-    if (ret != 0) {
-        return luaL_error(L, "gpio_pin_configure failed: %d", ret);
-    }
-
-    s_pin_flags[pin] = flags;
     lua_pushboolean(L, 1);
     return 1;
 }
@@ -158,39 +60,15 @@ static int l_gpio_pull(lua_State *L)
     const char *pull = luaL_checkstring(L, 2);
 
     const char *reason = NULL;
-    if (check_pin_safety(pin, &reason) != 0) {
+    if (hw_gpio_check_safety(pin, &reason) != 0) {
         return luaL_error(L, "pin %d is %s", pin, reason);
     }
 
-    const struct device *dev;
-    gpio_pin_t pin_idx;
-    int ret = get_gpio_port_and_pin(pin, &dev, &pin_idx);
+    int ret = hw_gpio_pull(pin, pull);
     if (ret != 0) {
-        return luaL_error(L, "invalid pin %d", pin);
+        return luaL_error(L, "hw_gpio_pull failed: %d", ret);
     }
 
-    gpio_flags_t flags = s_pin_flags[pin];
-    if (flags == GPIO_DISCONNECTED && (flags & (GPIO_INPUT | GPIO_OUTPUT)) == 0) {
-        flags = GPIO_INPUT;
-    }
-
-    flags &= ~(GPIO_PULL_UP | GPIO_PULL_DOWN);
-    if (strcmp(pull, "up") == 0 || strcmp(pull, "pullup") == 0) {
-        flags |= GPIO_PULL_UP;
-    } else if (strcmp(pull, "down") == 0 || strcmp(pull, "pulldown") == 0) {
-        flags |= GPIO_PULL_DOWN;
-    } else if (strcmp(pull, "none") == 0 || strcmp(pull, "floating") == 0 || strcmp(pull, "off") == 0) {
-        /* cleared */
-    } else {
-        return luaL_error(L, "unknown pull mode '%s' (expected 'up', 'down', 'none')", pull);
-    }
-
-    ret = gpio_pin_configure(dev, pin_idx, flags);
-    if (ret != 0) {
-        return luaL_error(L, "gpio_pin_configure failed: %d", ret);
-    }
-
-    s_pin_flags[pin] = flags;
     lua_pushboolean(L, 1);
     return 1;
 }
@@ -199,24 +77,15 @@ static int l_gpio_tristate(lua_State *L)
 {
     int pin = (int)luaL_checkinteger(L, 1);
     const char *reason = NULL;
-    if (check_pin_safety(pin, &reason) != 0) {
+    if (hw_gpio_check_safety(pin, &reason) != 0) {
         return luaL_error(L, "pin %d is %s", pin, reason);
     }
 
-    const struct device *dev;
-    gpio_pin_t pin_idx;
-    int ret = get_gpio_port_and_pin(pin, &dev, &pin_idx);
+    int ret = hw_gpio_tristate(pin);
     if (ret != 0) {
-        return luaL_error(L, "invalid pin %d", pin);
+        return luaL_error(L, "hw_gpio_tristate failed: %d", ret);
     }
 
-    esp_rom_gpio_pad_select_gpio((uint32_t)pin);
-    ret = gpio_pin_configure(dev, pin_idx, GPIO_DISCONNECTED);
-    if (ret != 0) {
-        return luaL_error(L, "gpio_pin_configure failed: %d", ret);
-    }
-
-    s_pin_flags[pin] = GPIO_DISCONNECTED;
     lua_pushboolean(L, 1);
     return 1;
 }
@@ -227,20 +96,13 @@ static int l_gpio_write(lua_State *L)
     int val = (int)luaL_checkinteger(L, 2);
 
     const char *reason = NULL;
-    if (check_pin_safety(pin, &reason) != 0) {
+    if (hw_gpio_check_safety(pin, &reason) != 0) {
         return luaL_error(L, "pin %d is %s", pin, reason);
     }
 
-    const struct device *dev;
-    gpio_pin_t pin_idx;
-    int ret = get_gpio_port_and_pin(pin, &dev, &pin_idx);
+    int ret = hw_gpio_write(pin, val);
     if (ret != 0) {
-        return luaL_error(L, "invalid pin %d", pin);
-    }
-
-    ret = gpio_pin_set(dev, pin_idx, val ? 1 : 0);
-    if (ret != 0) {
-        return luaL_error(L, "gpio_pin_set failed: %d", ret);
+        return luaL_error(L, "hw_gpio_write failed: %d", ret);
     }
 
     lua_pushboolean(L, 1);
@@ -252,20 +114,13 @@ static int l_gpio_read(lua_State *L)
     int pin = (int)luaL_checkinteger(L, 1);
 
     const char *reason = NULL;
-    if (check_pin_safety(pin, &reason) != 0) {
+    if (hw_gpio_check_safety(pin, &reason) != 0) {
         return luaL_error(L, "pin %d is %s", pin, reason);
     }
 
-    const struct device *dev;
-    gpio_pin_t pin_idx;
-    int ret = get_gpio_port_and_pin(pin, &dev, &pin_idx);
-    if (ret != 0) {
-        return luaL_error(L, "invalid pin %d", pin);
-    }
-
-    int val = gpio_pin_get(dev, pin_idx);
+    int val = hw_gpio_read(pin);
     if (val < 0) {
-        return luaL_error(L, "gpio_pin_get failed: %d", val);
+        return luaL_error(L, "hw_gpio_read failed: %d", val);
     }
 
     lua_pushinteger(L, val);
@@ -277,20 +132,13 @@ static int l_gpio_toggle(lua_State *L)
     int pin = (int)luaL_checkinteger(L, 1);
 
     const char *reason = NULL;
-    if (check_pin_safety(pin, &reason) != 0) {
+    if (hw_gpio_check_safety(pin, &reason) != 0) {
         return luaL_error(L, "pin %d is %s", pin, reason);
     }
 
-    const struct device *dev;
-    gpio_pin_t pin_idx;
-    int ret = get_gpio_port_and_pin(pin, &dev, &pin_idx);
+    int ret = hw_gpio_toggle(pin);
     if (ret != 0) {
-        return luaL_error(L, "invalid pin %d", pin);
-    }
-
-    ret = gpio_pin_toggle(dev, pin_idx);
-    if (ret != 0) {
-        return luaL_error(L, "gpio_pin_toggle failed: %d", ret);
+        return luaL_error(L, "hw_gpio_toggle failed: %d", ret);
     }
 
     lua_pushboolean(L, 1);
@@ -301,15 +149,15 @@ static int l_gpio_high(lua_State *L)
 {
     int pin = (int)luaL_checkinteger(L, 1);
     const char *reason = NULL;
-    if (check_pin_safety(pin, &reason) != 0) {
+    if (hw_gpio_check_safety(pin, &reason) != 0) {
         return luaL_error(L, "pin %d is %s", pin, reason);
     }
-    const struct device *dev;
-    gpio_pin_t pin_idx;
-    if (get_gpio_port_and_pin(pin, &dev, &pin_idx) != 0) {
-        return luaL_error(L, "invalid pin %d", pin);
+
+    int ret = hw_gpio_high(pin);
+    if (ret != 0) {
+        return luaL_error(L, "hw_gpio_high failed: %d", ret);
     }
-    gpio_pin_set(dev, pin_idx, 1);
+
     lua_pushboolean(L, 1);
     return 1;
 }
@@ -318,15 +166,15 @@ static int l_gpio_low(lua_State *L)
 {
     int pin = (int)luaL_checkinteger(L, 1);
     const char *reason = NULL;
-    if (check_pin_safety(pin, &reason) != 0) {
+    if (hw_gpio_check_safety(pin, &reason) != 0) {
         return luaL_error(L, "pin %d is %s", pin, reason);
     }
-    const struct device *dev;
-    gpio_pin_t pin_idx;
-    if (get_gpio_port_and_pin(pin, &dev, &pin_idx) != 0) {
-        return luaL_error(L, "invalid pin %d", pin);
+
+    int ret = hw_gpio_low(pin);
+    if (ret != 0) {
+        return luaL_error(L, "hw_gpio_low failed: %d", ret);
     }
-    gpio_pin_set(dev, pin_idx, 0);
+
     lua_pushboolean(L, 1);
     return 1;
 }
@@ -335,19 +183,12 @@ static int l_gpio_drive(lua_State *L)
 {
     int pin = (int)luaL_checkinteger(L, 1);
     int ma = (int)luaL_checkinteger(L, 2);
-    const char *reason = NULL;
-    if (check_pin_safety(pin, &reason) != 0) {
-        return luaL_error(L, "pin %d is %s", pin, reason);
+
+    int ret = hw_gpio_drive(pin, ma);
+    if (ret != 0) {
+        return luaL_error(L, "invalid drive strength %d (expected 5, 10, 20, or 40 mA)", ma);
     }
 
-    uint32_t drv = 2; /* default 20mA */
-    if (ma == 5 || ma == 0) drv = 0;
-    else if (ma == 10 || ma == 1) drv = 1;
-    else if (ma == 20 || ma == 2) drv = 2;
-    else if (ma == 40 || ma == 3) drv = 3;
-    else return luaL_error(L, "invalid drive strength %d (expected 5, 10, 20, or 40 mA)", ma);
-
-    esp_rom_gpio_pad_set_drv((uint32_t)pin, drv);
     lua_pushboolean(L, 1);
     return 1;
 }
@@ -355,82 +196,46 @@ static int l_gpio_drive(lua_State *L)
 static int l_gpio_info(lua_State *L)
 {
     int pin = (int)luaL_checkinteger(L, 1);
-    if (pin < 0 || pin > 48) {
+    hw_gpio_info_t info;
+    int ret = hw_gpio_get_info(pin, &info);
+    if (ret != 0) {
         return luaL_error(L, "pin out of range (0..48)");
     }
 
     lua_newtable(L);
-    lua_pushinteger(L, pin);
+    lua_pushinteger(L, info.pin);
     lua_setfield(L, -2, "pin");
 
-    bool valid = (pin < 22 || pin > 25);
-    bool reserved = (!valid || pin == 19 || pin == 20 || (pin >= 26 && pin <= 37));
-
-    lua_pushboolean(L, valid);
+    lua_pushboolean(L, info.valid);
     lua_setfield(L, -2, "valid");
 
-    lua_pushboolean(L, reserved);
+    lua_pushboolean(L, info.reserved);
     lua_setfield(L, -2, "reserved");
 
-    lua_pushboolean(L, valid && !reserved);
+    lua_pushboolean(L, info.input);
     lua_setfield(L, -2, "input");
 
-    lua_pushboolean(L, valid && !reserved);
+    lua_pushboolean(L, info.output);
     lua_setfield(L, -2, "output");
 
-    lua_pushboolean(L, valid && !reserved);
+    lua_pushboolean(L, info.pullup);
     lua_setfield(L, -2, "pullup");
 
-    lua_pushboolean(L, valid && !reserved);
+    lua_pushboolean(L, info.pulldown);
     lua_setfield(L, -2, "pulldown");
 
-    /* ADC channel mapping */
-    static char adc_buf[16];
-    const char *adc_name = NULL;
-    if (pin >= 1 && pin <= 10) {
-        snprintf(adc_buf, sizeof(adc_buf), "ADC1_CH%d", pin - 1);
-        adc_name = adc_buf;
-    } else if (pin >= 11 && pin <= 20) {
-        snprintf(adc_buf, sizeof(adc_buf), "ADC2_CH%d", pin - 11);
-        adc_name = adc_buf;
-    }
+    lua_pushboolean(L, info.analog);
+    lua_setfield(L, -2, "analog");
 
-    if (adc_name && !reserved) {
-        lua_pushstring(L, adc_name);
+    if (info.adc_name) {
+        lua_pushstring(L, info.adc_name);
         lua_setfield(L, -2, "adc");
-        lua_pushboolean(L, 1);
-        lua_setfield(L, -2, "analog");
     } else {
         lua_pushnil(L);
         lua_setfield(L, -2, "adc");
-        lua_pushboolean(L, 0);
-        lua_setfield(L, -2, "analog");
     }
 
-    const char *desc = "General Purpose I/O";
-    if (!valid) {
-        desc = "Not bonded on ESP32-S3 silicon";
-    } else if (pin == 0) {
-        desc = "Strapping Pin (BOOT button)";
-    } else if (pin == 19) {
-        desc = "Reserved: Native USB OTG D- (Console)";
-    } else if (pin == 20) {
-        desc = "Reserved: Native USB OTG D+ (Console)";
-    } else if (pin >= 26 && pin <= 32) {
-        desc = "Reserved: Octal SPI Flash / PSRAM";
-    } else if (pin >= 33 && pin <= 37) {
-        desc = "Reserved: Octal PSRAM data lines";
-    } else if (pin == 43) {
-        desc = "UART0 TXD (Console UART)";
-    } else if (pin == 44) {
-        desc = "UART0 RXD (Console UART)";
-    } else if (pin == 45) {
-        desc = "Strapping Pin (VDD_SPI voltage)";
-    } else if (pin == 46) {
-        desc = "Strapping Pin (Boot Mode / ROM log)";
-    }
-
-    lua_pushstring(L, desc);
+    lua_pushstring(L, info.desc ? info.desc : "");
     lua_setfield(L, -2, "desc");
 
     return 1;
@@ -441,13 +246,33 @@ static int l_gpio_list(lua_State *L)
     lua_newtable(L);
     int idx = 1;
     for (int p = 0; p <= 48; p++) {
-        if (p >= 22 && p <= 25) continue;
-        if (p == 19 || p == 20) continue;
-        if (p >= 26 && p <= 37) continue;
-
-        lua_pushinteger(L, p);
-        lua_rawseti(L, -2, idx++);
+        if (hw_gpio_check_safety(p, NULL) == 0) {
+            lua_pushinteger(L, p);
+            lua_rawseti(L, -2, idx++);
+        }
     }
+    return 1;
+}
+
+static int l_gpio_status(lua_State *L)
+{
+    int pin = (int)luaL_checkinteger(L, 1);
+    char mode_buf[64] = {0};
+    int level = -1;
+
+    int ret = hw_gpio_get_state(pin, mode_buf, sizeof(mode_buf), &level);
+    if (ret != 0) {
+        return luaL_error(L, "pin %d is invalid or reserved", pin);
+    }
+
+    lua_newtable(L);
+    lua_pushinteger(L, pin);
+    lua_setfield(L, -2, "pin");
+    lua_pushstring(L, mode_buf);
+    lua_setfield(L, -2, "mode");
+    lua_pushinteger(L, level);
+    lua_setfield(L, -2, "level");
+
     return 1;
 }
 
@@ -460,7 +285,7 @@ static const luaL_Reg gpio_funcs[] = {
     {"read",      l_gpio_read},
     {"get",       l_gpio_read},
     {"high",      l_gpio_high},
-    {"set",       l_gpio_high},
+    {"set",       l_gpio_write},
     {"low",       l_gpio_low},
     {"clear",     l_gpio_low},
     {"toggle",    l_gpio_toggle},
@@ -469,6 +294,7 @@ static const luaL_Reg gpio_funcs[] = {
     {"caps",      l_gpio_info},
     {"list",      l_gpio_list},
     {"pins",      l_gpio_list},
+    {"status",    l_gpio_status},
     {NULL, NULL}
 };
 
@@ -484,12 +310,14 @@ static int l_matrix_route_out(lua_State *L)
     bool oen_inv = lua_toboolean(L, 4);
 
     const char *reason = NULL;
-    if (check_pin_safety(pin, &reason) != 0) {
+    if (hw_gpio_check_safety(pin, &reason) != 0) {
         return luaL_error(L, "pin %d is %s", pin, reason);
     }
 
-    esp_rom_gpio_pad_select_gpio((uint32_t)pin);
-    esp_rom_gpio_connect_out_signal((uint32_t)pin, (uint32_t)sig_idx, out_inv, oen_inv);
+    int ret = hw_matrix_route_out(pin, sig_idx, out_inv, oen_inv);
+    if (ret != 0) {
+        return luaL_error(L, "hw_matrix_route_out failed: %d", ret);
+    }
 
     lua_pushboolean(L, 1);
     return 1;
@@ -502,12 +330,14 @@ static int l_matrix_route_in(lua_State *L)
     bool inv = lua_toboolean(L, 3);
 
     const char *reason = NULL;
-    if (check_pin_safety(pin, &reason) != 0) {
+    if (hw_gpio_check_safety(pin, &reason) != 0) {
         return luaL_error(L, "pin %d is %s", pin, reason);
     }
 
-    esp_rom_gpio_pad_select_gpio((uint32_t)pin);
-    esp_rom_gpio_connect_in_signal((uint32_t)pin, (uint32_t)sig_idx, inv);
+    int ret = hw_matrix_route_in(pin, sig_idx, inv);
+    if (ret != 0) {
+        return luaL_error(L, "hw_matrix_route_in failed: %d", ret);
+    }
 
     lua_pushboolean(L, 1);
     return 1;
@@ -517,11 +347,15 @@ static int l_matrix_detach(lua_State *L)
 {
     int pin = (int)luaL_checkinteger(L, 1);
     const char *reason = NULL;
-    if (check_pin_safety(pin, &reason) != 0) {
+    if (hw_gpio_check_safety(pin, &reason) != 0) {
         return luaL_error(L, "pin %d is %s", pin, reason);
     }
 
-    esp_rom_gpio_connect_out_signal((uint32_t)pin, SIG_GPIO_OUT_IDX, false, false);
+    int ret = hw_matrix_detach(pin);
+    if (ret != 0) {
+        return luaL_error(L, "hw_matrix_detach failed: %d", ret);
+    }
+
     lua_pushboolean(L, 1);
     return 1;
 }
@@ -530,6 +364,364 @@ static const luaL_Reg matrix_funcs[] = {
     {"route_out", l_matrix_route_out},
     {"route_in",  l_matrix_route_in},
     {"detach",    l_matrix_detach},
+    {NULL, NULL}
+};
+
+/* ========================================================================= */
+/*                              'pwm' MODULE                                 */
+/* ========================================================================= */
+
+static int l_pwm_set(lua_State *L)
+{
+    int pin = (int)luaL_checkinteger(L, 1);
+    uint32_t freq_hz = (uint32_t)luaL_checkinteger(L, 2);
+    uint32_t duty_percent = (uint32_t)luaL_checkinteger(L, 3);
+
+    const char *reason = NULL;
+    if (hw_gpio_check_safety(pin, &reason) != 0) {
+        return luaL_error(L, "pin %d is %s", pin, reason);
+    }
+
+    int ret = hw_pwm_set(pin, freq_hz, duty_percent);
+    if (ret != 0) {
+        return luaL_error(L, "hw_pwm_set failed: %d", ret);
+    }
+
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int l_pwm_stop(lua_State *L)
+{
+    int pin = (int)luaL_checkinteger(L, 1);
+    int ret = hw_pwm_stop(pin);
+    if (ret != 0) {
+        return luaL_error(L, "hw_pwm_stop failed (pin %d not active): %d", pin, ret);
+    }
+
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int l_pwm_status(lua_State *L)
+{
+    if (lua_gettop(L) >= 1 && !lua_isnil(L, 1)) {
+        int pin = (int)luaL_checkinteger(L, 1);
+        hw_pwm_status_t st;
+        int ret = hw_pwm_get_pin_status(pin, &st);
+        if (ret != 0) {
+            lua_pushnil(L);
+            return 1;
+        }
+
+        lua_newtable(L);
+        lua_pushinteger(L, st.channel);
+        lua_setfield(L, -2, "channel");
+        lua_pushinteger(L, st.pin);
+        lua_setfield(L, -2, "pin");
+        lua_pushinteger(L, st.freq_hz);
+        lua_setfield(L, -2, "freq");
+        lua_pushinteger(L, st.duty_percent);
+        lua_setfield(L, -2, "duty");
+        lua_pushboolean(L, st.active);
+        lua_setfield(L, -2, "active");
+        return 1;
+    }
+
+    /* Return table of all active channels */
+    hw_pwm_status_t list[HW_PWM_MAX_CHANNELS];
+    size_t count = 0;
+    hw_pwm_get_all_status(list, HW_PWM_MAX_CHANNELS, &count);
+
+    lua_newtable(L);
+    for (size_t i = 0; i < count; i++) {
+        lua_newtable(L);
+        lua_pushinteger(L, list[i].channel);
+        lua_setfield(L, -2, "channel");
+        lua_pushinteger(L, list[i].pin);
+        lua_setfield(L, -2, "pin");
+        lua_pushinteger(L, list[i].freq_hz);
+        lua_setfield(L, -2, "freq");
+        lua_pushinteger(L, list[i].duty_percent);
+        lua_setfield(L, -2, "duty");
+        lua_pushboolean(L, list[i].active);
+        lua_setfield(L, -2, "active");
+
+        lua_rawseti(L, -2, (lua_Integer)(i + 1));
+    }
+    return 1;
+}
+
+static const luaL_Reg pwm_funcs[] = {
+    {"set",    l_pwm_set},
+    {"stop",   l_pwm_stop},
+    {"status", l_pwm_status},
+    {NULL, NULL}
+};
+
+/* ========================================================================= */
+/*                              'i2c' MODULE                                 */
+/* ========================================================================= */
+
+/* Helper: parse Lua args into byte buffer (table, string, or varargs) */
+static size_t parse_lua_bytes(lua_State *L, int start_idx, uint8_t *buf, size_t max_buf)
+{
+    size_t len = 0;
+    int top = lua_gettop(L);
+
+    if (start_idx > top) return 0;
+
+    if (lua_istable(L, start_idx)) {
+        lua_Integer tlen = luaL_len(L, start_idx);
+        for (lua_Integer i = 1; i <= tlen && len < max_buf; i++) {
+            lua_rawgeti(L, start_idx, i);
+            buf[len++] = (uint8_t)lua_tointeger(L, -1);
+            lua_pop(L, 1);
+        }
+    } else if (lua_isstring(L, start_idx)) {
+        size_t slen = 0;
+        const char *s = lua_tolstring(L, start_idx, &slen);
+        if (slen > max_buf) slen = max_buf;
+        memcpy(buf, s, slen);
+        len = slen;
+    } else {
+        for (int i = start_idx; i <= top && len < max_buf; i++) {
+            buf[len++] = (uint8_t)luaL_checkinteger(L, i);
+        }
+    }
+    return len;
+}
+
+static int l_i2c_scan(lua_State *L)
+{
+    int scl = (int)luaL_checkinteger(L, 1);
+    int sda = (int)luaL_checkinteger(L, 2);
+
+    uint8_t found[128];
+    size_t count = 0;
+    int ret = hw_i2c_scan(scl, sda, found, sizeof(found), &count);
+    if (ret != 0) {
+        return luaL_error(L, "hw_i2c_scan failed: %d", ret);
+    }
+
+    lua_newtable(L);
+    for (size_t i = 0; i < count; i++) {
+        lua_pushinteger(L, found[i]);
+        lua_rawseti(L, -2, (lua_Integer)(i + 1));
+    }
+    return 1;
+}
+
+static int l_i2c_write(lua_State *L)
+{
+    int scl = (int)luaL_checkinteger(L, 1);
+    int sda = (int)luaL_checkinteger(L, 2);
+    uint8_t addr = (uint8_t)luaL_checkinteger(L, 3);
+
+    uint8_t buf[256];
+    size_t len = parse_lua_bytes(L, 4, buf, sizeof(buf));
+
+    int ret = hw_i2c_write(scl, sda, addr, buf, len);
+    if (ret != 0) {
+        return luaL_error(L, "hw_i2c_write failed: %d", ret);
+    }
+
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int l_i2c_read(lua_State *L)
+{
+    int scl = (int)luaL_checkinteger(L, 1);
+    int sda = (int)luaL_checkinteger(L, 2);
+    uint8_t addr = (uint8_t)luaL_checkinteger(L, 3);
+    size_t len = (size_t)luaL_checkinteger(L, 4);
+
+    if (len > 512) len = 512;
+    uint8_t buf[512];
+
+    int ret = hw_i2c_read(scl, sda, addr, buf, len);
+    if (ret != 0) {
+        return luaL_error(L, "hw_i2c_read failed: %d", ret);
+    }
+
+    lua_newtable(L);
+    for (size_t i = 0; i < len; i++) {
+        lua_pushinteger(L, buf[i]);
+        lua_rawseti(L, -2, (lua_Integer)(i + 1));
+    }
+    return 1;
+}
+
+static int l_i2c_write_read(lua_State *L)
+{
+    int scl = (int)luaL_checkinteger(L, 1);
+    int sda = (int)luaL_checkinteger(L, 2);
+    uint8_t addr = (uint8_t)luaL_checkinteger(L, 3);
+
+    uint8_t tx_buf[128];
+    size_t tx_len = 0;
+
+    if (lua_istable(L, 4)) {
+        tx_len = parse_lua_bytes(L, 4, tx_buf, sizeof(tx_buf));
+    } else {
+        tx_buf[0] = (uint8_t)luaL_checkinteger(L, 4);
+        tx_len = 1;
+    }
+
+    size_t rx_len = (size_t)luaL_checkinteger(L, 5);
+    if (rx_len > 512) rx_len = 512;
+    uint8_t rx_buf[512];
+
+    int ret = hw_i2c_write_read(scl, sda, addr, tx_buf, tx_len, rx_buf, rx_len);
+    if (ret != 0) {
+        return luaL_error(L, "hw_i2c_write_read failed: %d", ret);
+    }
+
+    lua_newtable(L);
+    for (size_t i = 0; i < rx_len; i++) {
+        lua_pushinteger(L, rx_buf[i]);
+        lua_rawseti(L, -2, (lua_Integer)(i + 1));
+    }
+    return 1;
+}
+
+static int l_i2c_status(lua_State *L)
+{
+    hw_i2c_status_t st;
+    hw_i2c_get_status(&st);
+
+    lua_newtable(L);
+    lua_pushinteger(L, st.scl_pin);
+    lua_setfield(L, -2, "scl");
+    lua_pushinteger(L, st.sda_pin);
+    lua_setfield(L, -2, "sda");
+    lua_pushinteger(L, st.speed_khz);
+    lua_setfield(L, -2, "speed_khz");
+    lua_pushboolean(L, st.active);
+    lua_setfield(L, -2, "active");
+
+    lua_newtable(L);
+    for (int i = 0; i < st.last_scanned_count; i++) {
+        lua_pushinteger(L, st.last_scanned_addrs[i]);
+        lua_rawseti(L, -2, i + 1);
+    }
+    lua_setfield(L, -2, "last_scan");
+
+    return 1;
+}
+
+static const luaL_Reg i2c_funcs[] = {
+    {"scan",       l_i2c_scan},
+    {"write",      l_i2c_write},
+    {"read",       l_i2c_read},
+    {"write_read", l_i2c_write_read},
+    {"status",     l_i2c_status},
+    {NULL, NULL}
+};
+
+/* ========================================================================= */
+/*                              'spi' MODULE                                 */
+/* ========================================================================= */
+
+static int l_spi_transfer(lua_State *L)
+{
+    int sck  = (int)luaL_checkinteger(L, 1);
+    int mosi = (int)luaL_checkinteger(L, 2);
+    int miso = (int)luaL_checkinteger(L, 3);
+    int cs   = (int)luaL_checkinteger(L, 4);
+    uint8_t mode = (uint8_t)luaL_checkinteger(L, 5);
+
+    uint8_t tx[256];
+    size_t len = parse_lua_bytes(L, 6, tx, sizeof(tx));
+    if (len == 0) len = 1;
+
+    uint8_t rx[256];
+    int ret = hw_spi_transfer(sck, mosi, miso, cs, mode, tx, rx, len);
+    if (ret != 0) {
+        return luaL_error(L, "hw_spi_transfer failed: %d", ret);
+    }
+
+    lua_newtable(L);
+    for (size_t i = 0; i < len; i++) {
+        lua_pushinteger(L, rx[i]);
+        lua_rawseti(L, -2, (lua_Integer)(i + 1));
+    }
+    return 1;
+}
+
+static int l_spi_write(lua_State *L)
+{
+    int sck  = (int)luaL_checkinteger(L, 1);
+    int mosi = (int)luaL_checkinteger(L, 2);
+    int cs   = (int)luaL_checkinteger(L, 3);
+    uint8_t mode = (uint8_t)luaL_checkinteger(L, 4);
+
+    uint8_t tx[256];
+    size_t len = parse_lua_bytes(L, 5, tx, sizeof(tx));
+
+    int ret = hw_spi_write(sck, mosi, cs, mode, tx, len);
+    if (ret != 0) {
+        return luaL_error(L, "hw_spi_write failed: %d", ret);
+    }
+
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int l_spi_read(lua_State *L)
+{
+    int sck  = (int)luaL_checkinteger(L, 1);
+    int miso = (int)luaL_checkinteger(L, 2);
+    int cs   = (int)luaL_checkinteger(L, 3);
+    uint8_t mode = (uint8_t)luaL_checkinteger(L, 4);
+    size_t len = (size_t)luaL_checkinteger(L, 5);
+
+    if (len > 256) len = 256;
+    uint8_t rx[256];
+
+    int ret = hw_spi_read(sck, miso, cs, mode, rx, len);
+    if (ret != 0) {
+        return luaL_error(L, "hw_spi_read failed: %d", ret);
+    }
+
+    lua_newtable(L);
+    for (size_t i = 0; i < len; i++) {
+        lua_pushinteger(L, rx[i]);
+        lua_rawseti(L, -2, (lua_Integer)(i + 1));
+    }
+    return 1;
+}
+
+static int l_spi_status(lua_State *L)
+{
+    hw_spi_status_t st;
+    hw_spi_get_status(&st);
+
+    lua_newtable(L);
+    lua_pushinteger(L, st.sck_pin);
+    lua_setfield(L, -2, "sck");
+    lua_pushinteger(L, st.mosi_pin);
+    lua_setfield(L, -2, "mosi");
+    lua_pushinteger(L, st.miso_pin);
+    lua_setfield(L, -2, "miso");
+    lua_pushinteger(L, st.cs_pin);
+    lua_setfield(L, -2, "cs");
+    lua_pushinteger(L, st.freq_khz);
+    lua_setfield(L, -2, "freq_khz");
+    lua_pushinteger(L, st.mode);
+    lua_setfield(L, -2, "mode");
+    lua_pushboolean(L, st.active);
+    lua_setfield(L, -2, "active");
+
+    return 1;
+}
+
+static const luaL_Reg spi_funcs[] = {
+    {"transfer", l_spi_transfer},
+    {"write",    l_spi_write},
+    {"read",     l_spi_read},
+    {"status",   l_spi_status},
     {NULL, NULL}
 };
 
@@ -619,22 +811,47 @@ void luaopen_espirate_hardware(lua_State *L)
     lua_pushinteger(L, I2CEXT1_SDA_OUT_IDX);
     lua_setfield(L, -2, "I2C1_SDA");
 
-    lua_pushinteger(L, SPICLK_OUT_IDX);
+    lua_pushinteger(L, FSPICLK_OUT_IDX);
     lua_setfield(L, -2, "SPICLK");
-    lua_pushinteger(L, SPICS0_OUT_IDX);
+    lua_pushinteger(L, FSPICS0_OUT_IDX);
     lua_setfield(L, -2, "SPICS0");
-    lua_pushinteger(L, SPID_OUT_IDX);
+    lua_pushinteger(L, FSPID_OUT_IDX);
     lua_setfield(L, -2, "SPID");
-    lua_pushinteger(L, SPIQ_OUT_IDX);
+    lua_pushinteger(L, FSPIQ_IN_IDX);
     lua_setfield(L, -2, "SPIQ");
-    lua_pushinteger(L, SPIWP_OUT_IDX);
-    lua_setfield(L, -2, "SPIWP");
-    lua_pushinteger(L, SPIHD_OUT_IDX);
-    lua_setfield(L, -2, "SPIHD");
+
+    lua_pushinteger(L, LEDC_LS_SIG_OUT0_IDX);
+    lua_setfield(L, -2, "LEDC_OUT0");
+    lua_pushinteger(L, LEDC_LS_SIG_OUT1_IDX);
+    lua_setfield(L, -2, "LEDC_OUT1");
+    lua_pushinteger(L, LEDC_LS_SIG_OUT2_IDX);
+    lua_setfield(L, -2, "LEDC_OUT2");
+    lua_pushinteger(L, LEDC_LS_SIG_OUT3_IDX);
+    lua_setfield(L, -2, "LEDC_OUT3");
+    lua_pushinteger(L, LEDC_LS_SIG_OUT4_IDX);
+    lua_setfield(L, -2, "LEDC_OUT4");
+    lua_pushinteger(L, LEDC_LS_SIG_OUT5_IDX);
+    lua_setfield(L, -2, "LEDC_OUT5");
+    lua_pushinteger(L, LEDC_LS_SIG_OUT6_IDX);
+    lua_setfield(L, -2, "LEDC_OUT6");
+    lua_pushinteger(L, LEDC_LS_SIG_OUT7_IDX);
+    lua_setfield(L, -2, "LEDC_OUT7");
 
     lua_setglobal(L, "matrix");
 
-    /* 3. Register 'sys' */
+    /* 3. Register 'pwm' */
+    luaL_newlib(L, pwm_funcs);
+    lua_setglobal(L, "pwm");
+
+    /* 4. Register 'i2c' */
+    luaL_newlib(L, i2c_funcs);
+    lua_setglobal(L, "i2c");
+
+    /* 5. Register 'spi' */
+    luaL_newlib(L, spi_funcs);
+    lua_setglobal(L, "spi");
+
+    /* 6. Register 'sys' */
     luaL_newlib(L, sys_funcs);
     lua_setglobal(L, "sys");
 }

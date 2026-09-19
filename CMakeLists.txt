@@ -79,6 +79,10 @@ target_sources(app PRIVATE
   src/lua_worker.c
   src/fs_manager.c
   src/lua_gpio.c
+  src/hw_gpio.c
+  src/hw_pwm.c
+  src/hw_i2c.c
+  src/hw_spi.c
   src/wifi_manager.c
   src/captive_dns.c
   src/web_server.c

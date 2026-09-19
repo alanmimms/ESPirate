@@ -8,8 +8,15 @@
 #include <zephyr/version.h>
 #include <string.h>
 #include <strings.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <soc/gpio_sig_map.h>
 #include "shell_commands.h"
 #include "lua_manager.h"
+#include "hw_gpio.h"
+#include "hw_pwm.h"
+#include "hw_i2c.h"
+#include "hw_spi.h"
 
 static int cmd_info(const struct shell *sh, size_t argc, char **argv)
 {
@@ -498,6 +505,781 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_storage,
 );
 
 SHELL_CMD_REGISTER(storage, &sub_storage, "LittleFS storage commands", NULL);
+
+/* ========================================================================= */
+/*                       'gpio' SHELL COMMANDS                               */
+/* ========================================================================= */
+
+static int cmd_gpio_status(const struct shell *sh, size_t argc, char **argv)
+{
+    int pin = -1;
+    if (argc >= 2 && strcmp(argv[1], "status") != 0) {
+        pin = atoi(argv[1]);
+    } else if (argc >= 3) {
+        pin = atoi(argv[2]);
+    }
+
+    if (pin >= 0) {
+        char mode_buf[64] = {0};
+        int level = -1;
+        int ret = hw_gpio_get_state(pin, mode_buf, sizeof(mode_buf), &level);
+        if (ret != 0) {
+            shell_error(sh, "GPIO %d: invalid or reserved", pin);
+            return ret;
+        }
+        shell_print(sh, "GPIO %2d : %-32s | Level: %d", pin, mode_buf, level);
+        return 0;
+    }
+
+    shell_print(sh, "=== ESP32-S3 GPIO State Table ===");
+    shell_print(sh, "Pin  State & Configuration               Level  Notes");
+    shell_print(sh, "---  ----------------------------------  -----  ---------------------------");
+    for (int p = 0; p <= 48; p++) {
+        if (hw_gpio_check_safety(p, NULL) != 0) {
+            continue;
+        }
+        char mode_buf[64] = {0};
+        int level = -1;
+        hw_gpio_get_state(p, mode_buf, sizeof(mode_buf), &level);
+        hw_gpio_info_t info;
+        hw_gpio_get_info(p, &info);
+        shell_print(sh, "%2d   %-34s    %d    %s",
+                    p, mode_buf, level, info.desc ? info.desc : "");
+    }
+    return 0;
+}
+
+static int cmd_gpio_list(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    shell_print(sh, "=== Available ESP32-S3 Safe GPIO Pins ===");
+    shell_print(sh, "Pin  Status    Analog / ADC    Notes");
+    shell_print(sh, "---  --------  --------------  ---------------------------------");
+    for (int p = 0; p <= 48; p++) {
+        hw_gpio_info_t info;
+        if (hw_gpio_get_info(p, &info) != 0) continue;
+        if (info.reserved) {
+            shell_print(sh, "%2d   RESERVED  %-14s  %s", p, info.adc_name ? info.adc_name : "-", info.desc);
+        } else {
+            shell_print(sh, "%2d   USABLE    %-14s  %s", p, info.adc_name ? info.adc_name : "-", info.desc);
+        }
+    }
+    return 0;
+}
+
+static int cmd_gpio_info(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 2) {
+        shell_error(sh, "Usage: gpio info <pin>");
+        return -EINVAL;
+    }
+    int pin = atoi(argv[1]);
+    hw_gpio_info_t info;
+    int ret = hw_gpio_get_info(pin, &info);
+    if (ret != 0) {
+        shell_error(sh, "Pin %d out of range (0..48)", pin);
+        return ret;
+    }
+
+    shell_print(sh, "=== GPIO Pin %d Metadata ===", pin);
+    shell_print(sh, "  Bonded Silicon Pad : %s", info.valid ? "YES" : "NO");
+    shell_print(sh, "  System Reserved    : %s", info.reserved ? "YES (Protected)" : "NO (Safe)");
+    shell_print(sh, "  Digital Input      : %s", info.input ? "SUPPORTED" : "NO");
+    shell_print(sh, "  Digital Output     : %s", info.output ? "SUPPORTED" : "NO");
+    shell_print(sh, "  Pull-up/Pull-down  : %s", (info.pullup && info.pulldown) ? "SUPPORTED" : "NO");
+    shell_print(sh, "  Analog ADC Input   : %s", info.analog ? info.adc_name : "NO");
+    shell_print(sh, "  Description        : %s", info.desc ? info.desc : "");
+
+    char mode_buf[64] = {0};
+    int level = -1;
+    if (hw_gpio_get_state(pin, mode_buf, sizeof(mode_buf), &level) == 0) {
+        shell_print(sh, "  Current Config     : %s", mode_buf);
+        shell_print(sh, "  Current Logic Level: %d", level);
+    }
+    return 0;
+}
+
+static int cmd_gpio_mode(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 3) {
+        shell_error(sh, "Usage: gpio mode <pin> <in|out|open_drain|tristate> [up|down|none]");
+        return -EINVAL;
+    }
+    int pin = atoi(argv[1]);
+    const char *mode = argv[2];
+    const char *pull = (argc > 3) ? argv[3] : NULL;
+
+    int ret = hw_gpio_mode(pin, mode, pull);
+    if (ret != 0) {
+        shell_error(sh, "Failed to set GPIO %d mode to '%s': %d", pin, mode, ret);
+        return ret;
+    }
+    shell_print(sh, "GPIO %d configured as %s%s%s", pin, mode, pull ? " with pull " : "", pull ? pull : "");
+    return 0;
+}
+
+static int cmd_gpio_read(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 2) {
+        shell_error(sh, "Usage: gpio read <pin>");
+        return -EINVAL;
+    }
+    int pin = atoi(argv[1]);
+    int val = hw_gpio_read(pin);
+    if (val < 0) {
+        shell_error(sh, "Failed to read GPIO %d: %d", pin, val);
+        return val;
+    }
+    shell_print(sh, "GPIO %d = %d (%s)", pin, val, val ? "HIGH" : "LOW");
+    return 0;
+}
+
+static int cmd_gpio_write(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 3) {
+        shell_error(sh, "Usage: gpio write <pin> <0|1>");
+        return -EINVAL;
+    }
+    int pin = atoi(argv[1]);
+    int val = atoi(argv[2]);
+    int ret = hw_gpio_write(pin, val);
+    if (ret != 0) {
+        shell_error(sh, "Failed to write GPIO %d: %d", pin, ret);
+        return ret;
+    }
+    shell_print(sh, "GPIO %d set to %d (%s)", pin, val ? 1 : 0, val ? "HIGH" : "LOW");
+    return 0;
+}
+
+static int cmd_gpio_high(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 2) {
+        shell_error(sh, "Usage: gpio high <pin>");
+        return -EINVAL;
+    }
+    int pin = atoi(argv[1]);
+    int ret = hw_gpio_high(pin);
+    if (ret != 0) {
+        shell_error(sh, "Failed to set GPIO %d HIGH: %d", pin, ret);
+        return ret;
+    }
+    shell_print(sh, "GPIO %d set to 1 (HIGH)", pin);
+    return 0;
+}
+
+static int cmd_gpio_low(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 2) {
+        shell_error(sh, "Usage: gpio low <pin>");
+        return -EINVAL;
+    }
+    int pin = atoi(argv[1]);
+    int ret = hw_gpio_low(pin);
+    if (ret != 0) {
+        shell_error(sh, "Failed to set GPIO %d LOW: %d", pin, ret);
+        return ret;
+    }
+    shell_print(sh, "GPIO %d set to 0 (LOW)", pin);
+    return 0;
+}
+
+static int cmd_gpio_toggle(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 2) {
+        shell_error(sh, "Usage: gpio toggle <pin>");
+        return -EINVAL;
+    }
+    int pin = atoi(argv[1]);
+    int ret = hw_gpio_toggle(pin);
+    if (ret != 0) {
+        shell_error(sh, "Failed to toggle GPIO %d: %d", pin, ret);
+        return ret;
+    }
+    int val = hw_gpio_read(pin);
+    shell_print(sh, "GPIO %d toggled -> %d (%s)", pin, val, val ? "HIGH" : "LOW");
+    return 0;
+}
+
+static int cmd_gpio_tristate(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 2) {
+        shell_error(sh, "Usage: gpio tristate <pin>");
+        return -EINVAL;
+    }
+    int pin = atoi(argv[1]);
+    int ret = hw_gpio_tristate(pin);
+    if (ret != 0) {
+        shell_error(sh, "Failed to tristate GPIO %d: %d", pin, ret);
+        return ret;
+    }
+    shell_print(sh, "GPIO %d set to High-Impedance / Tristate (Hi-Z)", pin);
+    return 0;
+}
+
+static int cmd_gpio_pull(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 3) {
+        shell_error(sh, "Usage: gpio pull <pin> <up|down|none>");
+        return -EINVAL;
+    }
+    int pin = atoi(argv[1]);
+    int ret = hw_gpio_pull(pin, argv[2]);
+    if (ret != 0) {
+        shell_error(sh, "Failed to set GPIO %d pull: %d", pin, ret);
+        return ret;
+    }
+    shell_print(sh, "GPIO %d pull configured to '%s'", pin, argv[2]);
+    return 0;
+}
+
+static int cmd_gpio_drive(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 3) {
+        shell_error(sh, "Usage: gpio drive <pin> <5|10|20|40>");
+        return -EINVAL;
+    }
+    int pin = atoi(argv[1]);
+    int ma = atoi(argv[2]);
+    int ret = hw_gpio_drive(pin, ma);
+    if (ret != 0) {
+        shell_error(sh, "Failed to set GPIO %d drive strength: %d", pin, ret);
+        return ret;
+    }
+    shell_print(sh, "GPIO %d drive strength set to %d mA", pin, ma);
+    return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_gpio,
+    SHELL_CMD(status, NULL, "Show GPIO pin status: gpio status [pin]", cmd_gpio_status),
+    SHELL_CMD(list, NULL, "List safe ESP32-S3 GPIO pins: gpio list", cmd_gpio_list),
+    SHELL_CMD(info, NULL, "Show pin hardware capabilities: gpio info <pin>", cmd_gpio_info),
+    SHELL_CMD(mode, NULL, "Set pin mode: gpio mode <pin> <in|out|open_drain|tristate> [up|down|none]", cmd_gpio_mode),
+    SHELL_CMD(read, NULL, "Read digital level: gpio read <pin>", cmd_gpio_read),
+    SHELL_CMD(write, NULL, "Write digital level: gpio write <pin> <0|1>", cmd_gpio_write),
+    SHELL_CMD(high, NULL, "Set pin HIGH (1): gpio high <pin>", cmd_gpio_high),
+    SHELL_CMD(low, NULL, "Set pin LOW (0): gpio low <pin>", cmd_gpio_low),
+    SHELL_CMD(toggle, NULL, "Toggle digital output: gpio toggle <pin>", cmd_gpio_toggle),
+    SHELL_CMD(tristate, NULL, "Disconnect pin (Hi-Z): gpio tristate <pin>", cmd_gpio_tristate),
+    SHELL_CMD(hiz, NULL, "Alias for tristate: gpio hiz <pin>", cmd_gpio_tristate),
+    SHELL_CMD(pull, NULL, "Configure pull resistor: gpio pull <pin> <up|down|none>", cmd_gpio_pull),
+    SHELL_CMD(drive, NULL, "Set drive strength: gpio drive <pin> <5|10|20|40>", cmd_gpio_drive),
+    SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(gpio, &sub_gpio, "ESPirate GPIO commands (status, mode, read, write, high, low, toggle, tristate)", cmd_gpio_status);
+
+/* ========================================================================= */
+/*                      'matrix' SHELL COMMANDS                              */
+/* ========================================================================= */
+
+static int cmd_matrix_status(const struct shell *sh, size_t argc, char **argv)
+{
+    int pin = -1;
+    if (argc >= 2 && strcmp(argv[1], "status") != 0) {
+        pin = atoi(argv[1]);
+    } else if (argc >= 3) {
+        pin = atoi(argv[2]);
+    }
+
+    if (pin >= 0) {
+        char mode_buf[64] = {0};
+        int level = -1;
+        if (hw_gpio_get_state(pin, mode_buf, sizeof(mode_buf), &level) != 0) {
+            shell_error(sh, "GPIO %d invalid or reserved", pin);
+            return -EINVAL;
+        }
+        shell_print(sh, "GPIO %2d : %s", pin, mode_buf);
+        return 0;
+    }
+
+    shell_print(sh, "=== GPIO Matrix Routing Table ===");
+    shell_print(sh, "Pin  Configured Route & Signal");
+    shell_print(sh, "---  --------------------------------------------------");
+    int count = 0;
+    for (int p = 0; p <= 48; p++) {
+        if (hw_gpio_check_safety(p, NULL) != 0) continue;
+        char mode_buf[64] = {0};
+        int level = -1;
+        hw_gpio_get_state(p, mode_buf, sizeof(mode_buf), &level);
+        if (strstr(mode_buf, "Matrix") != NULL) {
+            shell_print(sh, "%2d   %s", p, mode_buf);
+            count++;
+        }
+    }
+    if (count == 0) {
+        shell_print(sh, "(No peripheral signals currently routed via GPIO matrix)");
+    }
+    return 0;
+}
+
+static int cmd_matrix_list(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+    shell_print(sh, "=== Common ESP32-S3 Output Signals ===");
+    shell_print(sh, "Signal ID  Name / Peripheral");
+    shell_print(sh, "---------  ----------------------------------------");
+    shell_print(sh, " %3d       GPIO_OUT (Default GPIO output)", SIG_GPIO_OUT_IDX);
+    shell_print(sh, " %3d       U0TXD (UART0 Console TX)", U0TXD_OUT_IDX);
+    shell_print(sh, " %3d       U1TXD (UART1 TX)", U1TXD_OUT_IDX);
+    shell_print(sh, " %3d       U2TXD (UART2 TX)", U2TXD_OUT_IDX);
+    shell_print(sh, " %3d       I2C0_SCL (I2C0 Clock)", I2CEXT0_SCL_OUT_IDX);
+    shell_print(sh, " %3d       I2C0_SDA (I2C0 Data)", I2CEXT0_SDA_OUT_IDX);
+    shell_print(sh, " %3d       I2C1_SCL (I2C1 Clock)", I2CEXT1_SCL_OUT_IDX);
+    shell_print(sh, " %3d       I2C1_SDA (I2C1 Data)", I2CEXT1_SDA_OUT_IDX);
+    shell_print(sh, " %3d       SPICLK (SPI2 Clock)", FSPICLK_OUT_IDX);
+    shell_print(sh, " %3d       SPID (SPI2 MOSI)", FSPID_OUT_IDX);
+    shell_print(sh, " %3d       SPICS0 (SPI2 CS0)", FSPICS0_OUT_IDX);
+    shell_print(sh, " %3d..%3d  LEDC_OUT0..7 (LEDC Hardware PWM Channels 0..7)",
+                LEDC_LS_SIG_OUT0_IDX, LEDC_LS_SIG_OUT7_IDX);
+    return 0;
+}
+
+static int cmd_matrix_route_out(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 3) {
+        shell_error(sh, "Usage: matrix route_out <pin> <sig_idx> [inv_out] [inv_oen]");
+        return -EINVAL;
+    }
+    int pin = atoi(argv[1]);
+    int sig = atoi(argv[2]);
+    bool inv_out = (argc > 3) ? (atoi(argv[3]) != 0) : false;
+    bool inv_oen = (argc > 4) ? (atoi(argv[4]) != 0) : false;
+
+    int ret = hw_matrix_route_out(pin, sig, inv_out, inv_oen);
+    if (ret != 0) {
+        shell_error(sh, "Failed to route signal %d to GPIO %d: %d", sig, pin, ret);
+        return ret;
+    }
+    shell_print(sh, "Routed Signal %d (%s) to GPIO %d", sig, hw_matrix_get_signal_name(sig), pin);
+    return 0;
+}
+
+static int cmd_matrix_route_in(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 3) {
+        shell_error(sh, "Usage: matrix route_in <pin> <sig_idx> [invert]");
+        return -EINVAL;
+    }
+    int pin = atoi(argv[1]);
+    int sig = atoi(argv[2]);
+    bool inv = (argc > 3) ? (atoi(argv[3]) != 0) : false;
+
+    int ret = hw_matrix_route_in(pin, sig, inv);
+    if (ret != 0) {
+        shell_error(sh, "Failed to route GPIO %d to signal %d: %d", pin, sig, ret);
+        return ret;
+    }
+    shell_print(sh, "Routed GPIO %d into Signal %d", pin, sig);
+    return 0;
+}
+
+static int cmd_matrix_detach(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 2) {
+        shell_error(sh, "Usage: matrix detach <pin>");
+        return -EINVAL;
+    }
+    int pin = atoi(argv[1]);
+    int ret = hw_matrix_detach(pin);
+    if (ret != 0) {
+        shell_error(sh, "Failed to detach GPIO %d: %d", pin, ret);
+        return ret;
+    }
+    shell_print(sh, "GPIO %d detached from matrix (restored to standard GPIO)", pin);
+    return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_matrix,
+    SHELL_CMD(status, NULL, "Show GPIO Matrix routing table: matrix status [pin]", cmd_matrix_status),
+    SHELL_CMD(list, NULL, "List available peripheral signals: matrix list", cmd_matrix_list),
+    SHELL_CMD(route_out, NULL, "Route peripheral signal out: matrix route_out <pin> <sig_idx> [inv_out] [inv_oen]", cmd_matrix_route_out),
+    SHELL_CMD(route_in, NULL, "Route pin into peripheral input: matrix route_in <pin> <sig_idx> [inv]", cmd_matrix_route_in),
+    SHELL_CMD(detach, NULL, "Detach matrix route: matrix detach <pin>", cmd_matrix_detach),
+    SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(matrix, &sub_matrix, "ESPirate GPIO Matrix commands", cmd_matrix_status);
+
+/* ========================================================================= */
+/*                        'pwm' SHELL COMMANDS                               */
+/* ========================================================================= */
+
+static int cmd_pwm_status(const struct shell *sh, size_t argc, char **argv)
+{
+    int pin = -1;
+    if (argc >= 2 && strcmp(argv[1], "status") != 0) {
+        pin = atoi(argv[1]);
+    } else if (argc >= 3) {
+        pin = atoi(argv[2]);
+    }
+
+    if (pin >= 0) {
+        hw_pwm_status_t st;
+        int ret = hw_pwm_get_pin_status(pin, &st);
+        if (ret != 0) {
+            shell_print(sh, "GPIO %d: PWM inactive", pin);
+            return 0;
+        }
+        shell_print(sh, "GPIO %2d : PWM Channel %d | %u Hz | Duty: %u%%",
+                    pin, st.channel, st.freq_hz, st.duty_percent);
+        return 0;
+    }
+
+    hw_pwm_status_t list[HW_PWM_MAX_CHANNELS];
+    size_t count = 0;
+    hw_pwm_get_all_status(list, HW_PWM_MAX_CHANNELS, &count);
+
+    if (count == 0) {
+        shell_print(sh, "No active PWM channels. Use 'pwm set <pin> <freq_hz> <duty_percent>'.");
+        return 0;
+    }
+
+    shell_print(sh, "=== LEDC Hardware PWM Channels (%zu Active) ===", count);
+    shell_print(sh, "Channel  GPIO Pin  Frequency (Hz)  Duty Cycle (%%)  Active");
+    shell_print(sh, "-------  --------  --------------  --------------  ------");
+    for (size_t i = 0; i < count; i++) {
+        shell_print(sh, "   %2d       %2d       %8u Hz         %3u%%        YES",
+                    list[i].channel, list[i].pin, list[i].freq_hz, list[i].duty_percent);
+    }
+    return 0;
+}
+
+static int cmd_pwm_set(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 4) {
+        shell_error(sh, "Usage: pwm set <pin> <freq_hz> <duty_percent>");
+        return -EINVAL;
+    }
+    int pin = atoi(argv[1]);
+    uint32_t freq = (uint32_t)strtoul(argv[2], NULL, 0);
+    uint32_t duty = (uint32_t)strtoul(argv[3], NULL, 0);
+
+    int ret = hw_pwm_set(pin, freq, duty);
+    if (ret != 0) {
+        shell_error(sh, "Failed to start PWM on GPIO %d: %d", pin, ret);
+        return ret;
+    }
+    shell_print(sh, "PWM active on GPIO %d: %u Hz, %u%% duty cycle", pin, freq, duty);
+    return 0;
+}
+
+static int cmd_pwm_stop(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 2) {
+        shell_error(sh, "Usage: pwm stop <pin>");
+        return -EINVAL;
+    }
+    int pin = atoi(argv[1]);
+    int ret = hw_pwm_stop(pin);
+    if (ret != 0) {
+        shell_error(sh, "Failed to stop PWM on GPIO %d: %d", pin, ret);
+        return ret;
+    }
+    shell_print(sh, "PWM stopped on GPIO %d (channel released, pin tristated)", pin);
+    return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_pwm,
+    SHELL_CMD(status, NULL, "Show active PWM channels: pwm status [pin]", cmd_pwm_status),
+    SHELL_CMD(set, NULL, "Start PWM: pwm set <pin> <freq_hz> <duty_percent>", cmd_pwm_set),
+    SHELL_CMD(stop, NULL, "Stop PWM: pwm stop <pin>", cmd_pwm_stop),
+    SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(pwm, &sub_pwm, "ESPirate Hardware PWM (LEDC) commands", cmd_pwm_status);
+
+/* ========================================================================= */
+/*                        'i2c' SHELL COMMANDS                               */
+/* ========================================================================= */
+
+static int cmd_i2c_status(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    hw_i2c_status_t st;
+    hw_i2c_get_status(&st);
+
+    shell_print(sh, "=== I2C Subsystem Status ===");
+    shell_print(sh, "  Bus Active : %s", st.active ? "YES" : "NO");
+    shell_print(sh, "  SCL Pin    : %d", st.scl_pin);
+    shell_print(sh, "  SDA Pin    : %d", st.sda_pin);
+    shell_print(sh, "  Speed      : %u kHz", st.speed_khz);
+    shell_print(sh, "  Last Scan  : %u device(s) found", st.last_scanned_count);
+    if (st.last_scanned_count > 0) {
+        shell_fprintf(sh, SHELL_NORMAL, "  Addresses  : ");
+        for (int i = 0; i < st.last_scanned_count; i++) {
+            shell_fprintf(sh, SHELL_NORMAL, "0x%02X%s", st.last_scanned_addrs[i],
+                          (i + 1 < st.last_scanned_count) ? ", " : "\n");
+        }
+    }
+    return 0;
+}
+
+static int cmd_i2c_scan(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 3) {
+        shell_error(sh, "Usage: i2c scan <scl_pin> <sda_pin>");
+        return -EINVAL;
+    }
+    int scl = atoi(argv[1]);
+    int sda = atoi(argv[2]);
+
+    shell_print(sh, "Scanning 7-bit I2C bus (SCL=%d, SDA=%d)...", scl, sda);
+
+    uint8_t addrs[128];
+    size_t count = 0;
+    int ret = hw_i2c_scan(scl, sda, addrs, sizeof(addrs), &count);
+    if (ret != 0) {
+        shell_error(sh, "I2C scan failed: %d", ret);
+        return ret;
+    }
+
+    shell_print(sh, "     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f");
+    for (int row = 0; row < 128; row += 16) {
+        shell_fprintf(sh, SHELL_NORMAL, "%02x: ", row);
+        for (int col = 0; col < 16; col++) {
+            int addr = row + col;
+            if (addr < 0x08 || addr > 0x77) {
+                shell_fprintf(sh, SHELL_NORMAL, "   ");
+                continue;
+            }
+            bool present = false;
+            for (size_t i = 0; i < count; i++) {
+                if (addrs[i] == addr) {
+                    present = true;
+                    break;
+                }
+            }
+            if (present) {
+                shell_fprintf(sh, SHELL_NORMAL, "%02x ", addr);
+            } else {
+                shell_fprintf(sh, SHELL_NORMAL, "-- ");
+            }
+        }
+        shell_fprintf(sh, SHELL_NORMAL, "\n");
+    }
+
+    shell_print(sh, "Scan complete: %zu device(s) found.", count);
+    return 0;
+}
+
+static int cmd_i2c_read(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 5) {
+        shell_error(sh, "Usage: i2c read <scl> <sda> <addr> <len>");
+        return -EINVAL;
+    }
+    int scl = atoi(argv[1]);
+    int sda = atoi(argv[2]);
+    uint8_t addr = (uint8_t)strtoul(argv[3], NULL, 0);
+    size_t len = (size_t)strtoul(argv[4], NULL, 0);
+    if (len > 256) len = 256;
+
+    uint8_t buf[256];
+    int ret = hw_i2c_read(scl, sda, addr, buf, len);
+    if (ret != 0) {
+        shell_error(sh, "I2C read from 0x%02X failed: %d", addr, ret);
+        return ret;
+    }
+
+    shell_print(sh, "Read %zu bytes from 0x%02X:", len, addr);
+    for (size_t i = 0; i < len; i++) {
+        shell_fprintf(sh, SHELL_NORMAL, "%02X ", buf[i]);
+        if ((i + 1) % 16 == 0 || i + 1 == len) {
+            shell_fprintf(sh, SHELL_NORMAL, "\n");
+        }
+    }
+    return 0;
+}
+
+static int cmd_i2c_write(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 5) {
+        shell_error(sh, "Usage: i2c write <scl> <sda> <addr> <b0> [b1 ...]");
+        return -EINVAL;
+    }
+    int scl = atoi(argv[1]);
+    int sda = atoi(argv[2]);
+    uint8_t addr = (uint8_t)strtoul(argv[3], NULL, 0);
+
+    uint8_t buf[64];
+    size_t len = 0;
+    for (size_t i = 4; i < argc && len < sizeof(buf); i++) {
+        buf[len++] = (uint8_t)strtoul(argv[i], NULL, 0);
+    }
+
+    int ret = hw_i2c_write(scl, sda, addr, buf, len);
+    if (ret != 0) {
+        shell_error(sh, "I2C write to 0x%02X failed: %d", addr, ret);
+        return ret;
+    }
+    shell_print(sh, "Wrote %zu bytes to I2C device 0x%02X", len, addr);
+    return 0;
+}
+
+static int cmd_i2c_write_read(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 6) {
+        shell_error(sh, "Usage: i2c write_read <scl> <sda> <addr> <tx_byte> <rx_len>");
+        return -EINVAL;
+    }
+    int scl = atoi(argv[1]);
+    int sda = atoi(argv[2]);
+    uint8_t addr = (uint8_t)strtoul(argv[3], NULL, 0);
+    uint8_t tx = (uint8_t)strtoul(argv[4], NULL, 0);
+    size_t rx_len = (size_t)strtoul(argv[5], NULL, 0);
+    if (rx_len > 256) rx_len = 256;
+
+    uint8_t rx[256];
+    int ret = hw_i2c_write_read(scl, sda, addr, &tx, 1, rx, rx_len);
+    if (ret != 0) {
+        shell_error(sh, "I2C write_read (reg 0x%02X) on 0x%02X failed: %d", tx, addr, ret);
+        return ret;
+    }
+
+    shell_print(sh, "Received %zu bytes from 0x%02X:", rx_len, addr);
+    for (size_t i = 0; i < rx_len; i++) {
+        shell_fprintf(sh, SHELL_NORMAL, "%02X ", rx[i]);
+    }
+    shell_fprintf(sh, SHELL_NORMAL, "\n");
+    return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_i2c,
+    SHELL_CMD(status, NULL, "Show I2C bus status: i2c status", cmd_i2c_status),
+    SHELL_CMD(scan, NULL, "Scan 7-bit bus: i2c scan <scl> <sda>", cmd_i2c_scan),
+    SHELL_CMD(read, NULL, "Read bytes: i2c read <scl> <sda> <addr> <len>", cmd_i2c_read),
+    SHELL_CMD(write, NULL, "Write bytes: i2c write <scl> <sda> <addr> <b0> [b1 ...]", cmd_i2c_write),
+    SHELL_CMD(write_read, NULL, "Write register then read: i2c write_read <scl> <sda> <addr> <tx> <rx_len>", cmd_i2c_write_read),
+    SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(i2c, &sub_i2c, "ESPirate I2C commands", cmd_i2c_status);
+
+/* ========================================================================= */
+/*                        'spi' SHELL COMMANDS                               */
+/* ========================================================================= */
+
+static int cmd_spi_status(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    hw_spi_status_t st;
+    hw_spi_get_status(&st);
+
+    shell_print(sh, "=== SPI Subsystem Status ===");
+    shell_print(sh, "  Bus Active : %s", st.active ? "YES" : "NO");
+    shell_print(sh, "  SCK Pin    : %d", st.sck_pin);
+    shell_print(sh, "  MOSI Pin   : %d", st.mosi_pin);
+    shell_print(sh, "  MISO Pin   : %d", st.miso_pin);
+    shell_print(sh, "  CS Pin     : %d", st.cs_pin);
+    shell_print(sh, "  Frequency  : %u kHz", st.freq_khz);
+    shell_print(sh, "  Mode       : %u (CPOL=%d, CPHA=%d)",
+                st.mode, (st.mode == 2 || st.mode == 3) ? 1 : 0, (st.mode == 1 || st.mode == 3) ? 1 : 0);
+    return 0;
+}
+
+static int cmd_spi_transfer(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 7) {
+        shell_error(sh, "Usage: spi transfer <sck> <mosi> <miso> <cs> <mode> <b0> [b1 ...]");
+        return -EINVAL;
+    }
+    int sck  = atoi(argv[1]);
+    int mosi = (strcmp(argv[2], "-") == 0 || strcmp(argv[2], "-1") == 0) ? -1 : atoi(argv[2]);
+    int miso = (strcmp(argv[3], "-") == 0 || strcmp(argv[3], "-1") == 0) ? -1 : atoi(argv[3]);
+    int cs   = (strcmp(argv[4], "-") == 0 || strcmp(argv[4], "-1") == 0) ? -1 : atoi(argv[4]);
+    uint8_t mode = (uint8_t)atoi(argv[5]);
+
+    uint8_t tx[128];
+    uint8_t rx[128];
+    size_t len = 0;
+    for (size_t i = 6; i < argc && len < sizeof(tx); i++) {
+        tx[len++] = (uint8_t)strtoul(argv[i], NULL, 0);
+    }
+
+    int ret = hw_spi_transfer(sck, mosi, miso, cs, mode, tx, rx, len);
+    if (ret != 0) {
+        shell_error(sh, "SPI transfer failed: %d", ret);
+        return ret;
+    }
+
+    shell_print(sh, "SPI Transfer Result (%zu bytes):", len);
+    shell_fprintf(sh, SHELL_NORMAL, "  TX: ");
+    for (size_t i = 0; i < len; i++) shell_fprintf(sh, SHELL_NORMAL, "%02X ", tx[i]);
+    shell_fprintf(sh, SHELL_NORMAL, "\n  RX: ");
+    for (size_t i = 0; i < len; i++) shell_fprintf(sh, SHELL_NORMAL, "%02X ", rx[i]);
+    shell_fprintf(sh, SHELL_NORMAL, "\n");
+    return 0;
+}
+
+static int cmd_spi_write(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 6) {
+        shell_error(sh, "Usage: spi write <sck> <mosi> <cs> <mode> <b0> [b1 ...]");
+        return -EINVAL;
+    }
+    int sck  = atoi(argv[1]);
+    int mosi = atoi(argv[2]);
+    int cs   = (strcmp(argv[3], "-") == 0 || strcmp(argv[3], "-1") == 0) ? -1 : atoi(argv[3]);
+    uint8_t mode = (uint8_t)atoi(argv[4]);
+
+    uint8_t tx[128];
+    size_t len = 0;
+    for (size_t i = 5; i < argc && len < sizeof(tx); i++) {
+        tx[len++] = (uint8_t)strtoul(argv[i], NULL, 0);
+    }
+
+    int ret = hw_spi_write(sck, mosi, cs, mode, tx, len);
+    if (ret != 0) {
+        shell_error(sh, "SPI write failed: %d", ret);
+        return ret;
+    }
+    shell_print(sh, "Transmitted %zu bytes over SPI", len);
+    return 0;
+}
+
+static int cmd_spi_read(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 6) {
+        shell_error(sh, "Usage: spi read <sck> <miso> <cs> <mode> <len>");
+        return -EINVAL;
+    }
+    int sck  = atoi(argv[1]);
+    int miso = atoi(argv[2]);
+    int cs   = (strcmp(argv[3], "-") == 0 || strcmp(argv[3], "-1") == 0) ? -1 : atoi(argv[3]);
+    uint8_t mode = (uint8_t)atoi(argv[4]);
+    size_t len = (size_t)strtoul(argv[5], NULL, 0);
+    if (len > 256) len = 256;
+
+    uint8_t rx[256];
+    int ret = hw_spi_read(sck, miso, cs, mode, rx, len);
+    if (ret != 0) {
+        shell_error(sh, "SPI read failed: %d", ret);
+        return ret;
+    }
+    shell_print(sh, "Read %zu bytes from SPI:", len);
+    for (size_t i = 0; i < len; i++) {
+        shell_fprintf(sh, SHELL_NORMAL, "%02X ", rx[i]);
+    }
+    shell_fprintf(sh, SHELL_NORMAL, "\n");
+    return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_spi,
+    SHELL_CMD(status, NULL, "Show SPI bus status: spi status", cmd_spi_status),
+    SHELL_CMD(transfer, NULL, "Full duplex transfer: spi transfer <sck> <mosi> <miso> <cs> <mode> <b0> [b1 ...]", cmd_spi_transfer),
+    SHELL_CMD(write, NULL, "Write bytes: spi write <sck> <mosi> <cs> <mode> <b0> [b1 ...]", cmd_spi_write),
+    SHELL_CMD(read, NULL, "Read bytes: spi read <sck> <miso> <cs> <mode> <len>", cmd_spi_read),
+    SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(spi, &sub_spi, "ESPirate SPI commands", cmd_spi_status);
 
 /* ========================================================================= */
 /*                          'lua' SHELL COMMAND                              */

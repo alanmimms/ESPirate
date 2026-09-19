@@ -18,6 +18,10 @@
 #include "lua_manager.h"
 #include "lua_worker.h"
 #include "wifi_manager.h"
+#include "hw_gpio.h"
+#include "hw_pwm.h"
+#include "hw_i2c.h"
+#include "hw_spi.h"
 
 LOG_MODULE_REGISTER(web_server, LOG_LEVEL_INF);
 
@@ -165,6 +169,48 @@ static void extract_json_str(const char *json, const char *key, char *out, size_
         out[i++] = *p++;
     }
     out[i] = '\0';
+}
+
+static int extract_json_int(const char *json, const char *key, int default_val)
+{
+    if (!json || !key) return default_val;
+    char needle[64];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+    char *p = strstr(json, needle);
+    if (!p) return default_val;
+    p += strlen(needle);
+    while (*p && (*p == ' ' || *p == ':' || *p == '\t')) p++;
+    if (*p == '"') p++;
+    return (int)strtol(p, NULL, 0);
+}
+
+static int extract_json_int_array(const char *json, const char *key, uint8_t *out, size_t max_out, size_t *count)
+{
+    if (!json || !key || !out) {
+        if (count) *count = 0;
+        return -EINVAL;
+    }
+    char needle[64];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+    char *p = strstr(json, needle);
+    if (!p) {
+        if (count) *count = 0;
+        return -ENOENT;
+    }
+    p = strchr(p, '[');
+    if (!p) {
+        if (count) *count = 0;
+        return -EINVAL;
+    }
+    p++;
+    size_t n = 0;
+    while (*p && *p != ']' && n < max_out) {
+        while (*p && (*p == ' ' || *p == ',' || *p == '\t' || *p == '\r' || *p == '\n')) p++;
+        if (*p == ']' || !*p) break;
+        out[n++] = (uint8_t)strtoul(p, &p, 0);
+    }
+    if (count) *count = n;
+    return 0;
 }
 
 static void handle_api_wifi_post(int sock, const char *body)
@@ -484,6 +530,330 @@ static void handle_api_run(int sock, const char *body)
     }
 }
 
+/* ========================================================================= */
+/*                   HARDWARE REST API HANDLERS                              */
+/* ========================================================================= */
+
+static void handle_api_gpio_get(int sock, const char *path)
+{
+    const char *p = strstr(path, "pin=");
+    if (p) {
+        int pin = atoi(p + 4);
+        char mode_buf[64] = {0};
+        int level = -1;
+        int ret = hw_gpio_get_state(pin, mode_buf, sizeof(mode_buf), &level);
+        if (ret != 0) {
+            send_http_response(sock, 400, "application/json", "{\"error\":\"Invalid or reserved pin\"}", 34);
+            return;
+        }
+        char json[256];
+        int len = snprintf(json, sizeof(json),
+            "{\"pin\":%d,\"mode\":\"%s\",\"level\":%d}",
+            pin, mode_buf, level);
+        send_http_response(sock, 200, "application/json", json, len);
+        return;
+    }
+
+    static char buf[3072];
+    size_t pos = 0;
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "[");
+    bool first = true;
+    for (int pin = 0; pin <= 48; pin++) {
+        if (hw_gpio_check_safety(pin, NULL) != 0) continue;
+        char mode_buf[64] = {0};
+        int level = -1;
+        hw_gpio_get_state(pin, mode_buf, sizeof(mode_buf), &level);
+        if (!first && pos < sizeof(buf) - 64) {
+            pos += snprintf(buf + pos, sizeof(buf) - pos, ",");
+        }
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        "{\"pin\":%d,\"mode\":\"%s\",\"level\":%d}",
+                        pin, mode_buf, level);
+        first = false;
+    }
+    if (pos < sizeof(buf) - 2) {
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "]");
+    }
+    send_http_response(sock, 200, "application/json", buf, pos);
+}
+
+static void handle_api_gpio_post(int sock, const char *body)
+{
+    int pin = extract_json_int(body, "pin", -1);
+    if (pin < 0) {
+        send_http_response(sock, 400, "application/json", "{\"error\":\"Missing pin parameter\"}", 32);
+        return;
+    }
+
+    char action[32] = {0};
+    char mode[32] = {0};
+    char pull[32] = {0};
+    extract_json_str(body, "action", action, sizeof(action));
+    extract_json_str(body, "mode", mode, sizeof(mode));
+    extract_json_str(body, "pull", pull, sizeof(pull));
+
+    int val = extract_json_int(body, "value", -1);
+    if (val < 0) val = extract_json_int(body, "level", -1);
+
+    int ret = 0;
+    if (strcmp(action, "mode") == 0 || strlen(mode) > 0) {
+        ret = hw_gpio_mode(pin, mode[0] ? mode : "out", pull[0] ? pull : NULL);
+    } else if (strcmp(action, "write") == 0 || val >= 0) {
+        ret = hw_gpio_write(pin, val > 0 ? 1 : 0);
+    } else if (strcmp(action, "high") == 0) {
+        ret = hw_gpio_high(pin);
+    } else if (strcmp(action, "low") == 0) {
+        ret = hw_gpio_low(pin);
+    } else if (strcmp(action, "toggle") == 0) {
+        ret = hw_gpio_toggle(pin);
+    } else if (strcmp(action, "tristate") == 0 || strcmp(action, "hiz") == 0) {
+        ret = hw_gpio_tristate(pin);
+    } else if (strcmp(action, "pull") == 0) {
+        ret = hw_gpio_pull(pin, pull[0] ? pull : "none");
+    } else if (strcmp(action, "drive") == 0) {
+        int ma = extract_json_int(body, "ma", 20);
+        ret = hw_gpio_drive(pin, ma);
+    } else {
+        ret = -EINVAL;
+    }
+
+    if (ret != 0) {
+        char err[128];
+        int len = snprintf(err, sizeof(err), "{\"error\":\"Operation failed\",\"code\":%d}", ret);
+        send_http_response(sock, 400, "application/json", err, len);
+        return;
+    }
+
+    char mode_buf[64] = {0};
+    int level = -1;
+    hw_gpio_get_state(pin, mode_buf, sizeof(mode_buf), &level);
+
+    char resp[256];
+    int len = snprintf(resp, sizeof(resp),
+        "{\"status\":\"ok\",\"pin\":%d,\"mode\":\"%s\",\"level\":%d}",
+        pin, mode_buf, level);
+    send_http_response(sock, 200, "application/json", resp, len);
+}
+
+static void handle_api_pwm_get(int sock)
+{
+    hw_pwm_status_t list[HW_PWM_MAX_CHANNELS];
+    size_t count = 0;
+    hw_pwm_get_all_status(list, HW_PWM_MAX_CHANNELS, &count);
+
+    char buf[512];
+    size_t pos = 0;
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "[");
+    for (size_t i = 0; i < count; i++) {
+        if (i > 0 && pos < sizeof(buf) - 64) {
+            pos += snprintf(buf + pos, sizeof(buf) - pos, ",");
+        }
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+            "{\"channel\":%d,\"pin\":%d,\"freq_hz\":%u,\"duty_percent\":%u}",
+            list[i].channel, list[i].pin, list[i].freq_hz, list[i].duty_percent);
+    }
+    if (pos < sizeof(buf) - 2) {
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "]");
+    }
+    send_http_response(sock, 200, "application/json", buf, pos);
+}
+
+static void handle_api_pwm_post(int sock, const char *body)
+{
+    char action[32] = {0};
+    extract_json_str(body, "action", action, sizeof(action));
+    int pin = extract_json_int(body, "pin", -1);
+    if (pin < 0) {
+        send_http_response(sock, 400, "application/json", "{\"error\":\"Missing pin\"}", 22);
+        return;
+    }
+
+    if (strcmp(action, "stop") == 0) {
+        int ret = hw_pwm_stop(pin);
+        if (ret != 0) {
+            send_http_response(sock, 400, "application/json", "{\"error\":\"PWM not active on pin\"}", 32);
+            return;
+        }
+        send_http_response(sock, 200, "application/json", "{\"status\":\"stopped\"}", 20);
+        return;
+    }
+
+    int freq = extract_json_int(body, "freq", 1000);
+    if (freq <= 0) freq = extract_json_int(body, "freq_hz", 1000);
+    int duty = extract_json_int(body, "duty", 50);
+    if (duty < 0) duty = extract_json_int(body, "duty_percent", 50);
+
+    int ret = hw_pwm_set(pin, (uint32_t)freq, (uint32_t)duty);
+    if (ret != 0) {
+        char err[128];
+        int len = snprintf(err, sizeof(err), "{\"error\":\"Failed to set PWM\",\"code\":%d}", ret);
+        send_http_response(sock, 400, "application/json", err, len);
+        return;
+    }
+
+    char resp[256];
+    int len = snprintf(resp, sizeof(resp),
+        "{\"status\":\"ok\",\"pin\":%d,\"freq_hz\":%d,\"duty_percent\":%d}",
+        pin, freq, duty);
+    send_http_response(sock, 200, "application/json", resp, len);
+}
+
+static void handle_api_i2c_get(int sock)
+{
+    hw_i2c_status_t st;
+    hw_i2c_get_status(&st);
+
+    char buf[512];
+    size_t pos = 0;
+    pos += snprintf(buf + pos, sizeof(buf) - pos,
+        "{\"scl\":%d,\"sda\":%d,\"speed_khz\":%u,\"active\":%s,\"devices\":[",
+        st.scl_pin, st.sda_pin, st.speed_khz, st.active ? "true" : "false");
+    for (int i = 0; i < st.last_scanned_count; i++) {
+        if (i > 0 && pos < sizeof(buf) - 32) {
+            pos += snprintf(buf + pos, sizeof(buf) - pos, ",");
+        }
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "\"0x%02X\"", st.last_scanned_addrs[i]);
+    }
+    if (pos < sizeof(buf) - 4) {
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "]}");
+    }
+    send_http_response(sock, 200, "application/json", buf, pos);
+}
+
+static void handle_api_i2c_scan(int sock, const char *body)
+{
+    int scl = extract_json_int(body, "scl", -1);
+    int sda = extract_json_int(body, "sda", -1);
+    if (scl < 0 || sda < 0) {
+        send_http_response(sock, 400, "application/json", "{\"error\":\"Missing scl or sda\"}", 28);
+        return;
+    }
+
+    uint8_t addrs[128];
+    size_t count = 0;
+    int ret = hw_i2c_scan(scl, sda, addrs, sizeof(addrs), &count);
+    if (ret != 0) {
+        char err[128];
+        int len = snprintf(err, sizeof(err), "{\"error\":\"Scan failed\",\"code\":%d}", ret);
+        send_http_response(sock, 400, "application/json", err, len);
+        return;
+    }
+
+    char buf[512];
+    size_t pos = 0;
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "{\"status\":\"ok\",\"found\":[");
+    for (size_t i = 0; i < count; i++) {
+        if (i > 0 && pos < sizeof(buf) - 32) {
+            pos += snprintf(buf + pos, sizeof(buf) - pos, ",");
+        }
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "\"0x%02X\"", addrs[i]);
+    }
+    if (pos < sizeof(buf) - 4) {
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "]}");
+    }
+    send_http_response(sock, 200, "application/json", buf, pos);
+}
+
+static void handle_api_i2c_write(int sock, const char *body)
+{
+    int scl = extract_json_int(body, "scl", -1);
+    int sda = extract_json_int(body, "sda", -1);
+    int addr = extract_json_int(body, "addr", -1);
+    uint8_t data[128];
+    size_t len = 0;
+    extract_json_int_array(body, "data", data, sizeof(data), &len);
+
+    if (scl < 0 || sda < 0 || addr < 0) {
+        send_http_response(sock, 400, "application/json", "{\"error\":\"Missing parameters\"}", 28);
+        return;
+    }
+
+    int ret = hw_i2c_write(scl, sda, (uint8_t)addr, data, len);
+    if (ret != 0) {
+        char err[128];
+        int l = snprintf(err, sizeof(err), "{\"error\":\"I2C write failed\",\"code\":%d}", ret);
+        send_http_response(sock, 400, "application/json", err, l);
+        return;
+    }
+    send_http_response(sock, 200, "application/json", "{\"status\":\"ok\"}", 15);
+}
+
+static void handle_api_i2c_read(int sock, const char *body)
+{
+    int scl = extract_json_int(body, "scl", -1);
+    int sda = extract_json_int(body, "sda", -1);
+    int addr = extract_json_int(body, "addr", -1);
+    int len = extract_json_int(body, "len", 1);
+    if (scl < 0 || sda < 0 || addr < 0 || len <= 0 || len > 256) {
+        send_http_response(sock, 400, "application/json", "{\"error\":\"Invalid parameters\"}", 28);
+        return;
+    }
+
+    uint8_t buf[256];
+    int ret = hw_i2c_read(scl, sda, (uint8_t)addr, buf, (size_t)len);
+    if (ret != 0) {
+        char err[128];
+        int l = snprintf(err, sizeof(err), "{\"error\":\"I2C read failed\",\"code\":%d}", ret);
+        send_http_response(sock, 400, "application/json", err, l);
+        return;
+    }
+
+    char resp[1024];
+    size_t pos = 0;
+    pos += snprintf(resp + pos, sizeof(resp) - pos, "{\"status\":\"ok\",\"data\":[");
+    for (int i = 0; i < len; i++) {
+        if (i > 0 && pos < sizeof(resp) - 16) pos += snprintf(resp + pos, sizeof(resp) - pos, ",");
+        pos += snprintf(resp + pos, sizeof(resp) - pos, "%u", buf[i]);
+    }
+    if (pos < sizeof(resp) - 4) pos += snprintf(resp + pos, sizeof(resp) - pos, "]}");
+    send_http_response(sock, 200, "application/json", resp, pos);
+}
+
+static void handle_api_spi_get(int sock)
+{
+    hw_spi_status_t st;
+    hw_spi_get_status(&st);
+
+    char buf[256];
+    int len = snprintf(buf, sizeof(buf),
+        "{\"sck\":%d,\"mosi\":%d,\"miso\":%d,\"cs\":%d,\"freq_khz\":%u,\"mode\":%u,\"active\":%s}",
+        st.sck_pin, st.mosi_pin, st.miso_pin, st.cs_pin, st.freq_khz, st.mode, st.active ? "true" : "false");
+    send_http_response(sock, 200, "application/json", buf, len);
+}
+
+static void handle_api_spi_transfer(int sock, const char *body)
+{
+    int sck = extract_json_int(body, "sck", -1);
+    int mosi = extract_json_int(body, "mosi", -1);
+    int miso = extract_json_int(body, "miso", -1);
+    int cs = extract_json_int(body, "cs", -1);
+    int mode = extract_json_int(body, "mode", 0);
+
+    uint8_t tx[128];
+    uint8_t rx[128];
+    size_t len = 0;
+    extract_json_int_array(body, "data", tx, sizeof(tx), &len);
+    if (len == 0) len = 1;
+
+    int ret = hw_spi_transfer(sck, mosi, miso, cs, (uint8_t)mode, tx, rx, len);
+    if (ret != 0) {
+        char err[128];
+        int l = snprintf(err, sizeof(err), "{\"error\":\"SPI transfer failed\",\"code\":%d}", ret);
+        send_http_response(sock, 400, "application/json", err, l);
+        return;
+    }
+
+    char resp[1024];
+    size_t pos = 0;
+    pos += snprintf(resp + pos, sizeof(resp) - pos, "{\"status\":\"ok\",\"rx\":[");
+    for (size_t i = 0; i < len; i++) {
+        if (i > 0 && pos < sizeof(resp) - 16) pos += snprintf(resp + pos, sizeof(resp) - pos, ",");
+        pos += snprintf(resp + pos, sizeof(resp) - pos, "%u", rx[i]);
+    }
+    if (pos < sizeof(resp) - 4) pos += snprintf(resp + pos, sizeof(resp) - pos, "]}");
+    send_http_response(sock, 200, "application/json", resp, pos);
+}
+
 static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
 {
     ARG_UNUSED(arg1);
@@ -648,6 +1018,14 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
                     handle_api_scripts_list(client_fd);
                 } else if (strcmp(clean_path, "/api/storage") == 0) {
                     handle_api_storage(client_fd);
+                } else if (strncmp(clean_path, "/api/gpio", 9) == 0) {
+                    handle_api_gpio_get(client_fd, req_path);
+                } else if (strcmp(clean_path, "/api/pwm") == 0) {
+                    handle_api_pwm_get(client_fd);
+                } else if (strcmp(clean_path, "/api/i2c") == 0) {
+                    handle_api_i2c_get(client_fd);
+                } else if (strcmp(clean_path, "/api/spi") == 0) {
+                    handle_api_spi_get(client_fd);
                 } else if (strncmp(clean_path, "/api/script", 11) == 0) {
                     handle_api_get_script(client_fd, req_path);
                 } else {
@@ -664,6 +1042,18 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
                     handle_api_wifi_config(client_fd, body);
                 } else if (strcmp(clean_path, "/api/wifi/forget") == 0) {
                     handle_api_wifi_forget(client_fd);
+                } else if (strcmp(clean_path, "/api/gpio") == 0) {
+                    handle_api_gpio_post(client_fd, body);
+                } else if (strcmp(clean_path, "/api/pwm") == 0) {
+                    handle_api_pwm_post(client_fd, body);
+                } else if (strcmp(clean_path, "/api/i2c/scan") == 0) {
+                    handle_api_i2c_scan(client_fd, body);
+                } else if (strcmp(clean_path, "/api/i2c/write") == 0) {
+                    handle_api_i2c_write(client_fd, body);
+                } else if (strcmp(clean_path, "/api/i2c/read") == 0) {
+                    handle_api_i2c_read(client_fd, body);
+                } else if (strcmp(clean_path, "/api/spi") == 0 || strcmp(clean_path, "/api/spi/transfer") == 0) {
+                    handle_api_spi_transfer(client_fd, body);
                 } else if (strcmp(clean_path, "/api/telemetry/reset") == 0) {
                     espirate_telemetry_reset();
                     send_http_response(client_fd, 200, "application/json", "{\"status\":\"ok\"}", 15);
