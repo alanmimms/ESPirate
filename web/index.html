@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<!-- ESPirate Dashboard UI v1.1 -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESPirate Hardware Sequencer</title>
+<style>
+:root { --bg:#0f172a; --card:#1e293b; --text:#f8fafc; --accent:#38bdf8; --pass:#22c55e; --fail:#ef4444; --border:#334155; }
+* { box-sizing: border-box; margin:0; padding:0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+body { background: var(--bg); color: var(--text); padding: 1.5rem; max-width: 1200px; margin: auto; }
+header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 0.75rem; }
+h1 { font-size: 1.6rem; color: var(--accent); display: flex; align-items: center; gap: 0.5rem; }
+.badge { background: #0369a1; color: #e0f2fe; padding: 0.25rem 0.6rem; border-radius: 9999px; font-size: 0.75rem; font-weight: bold; }
+.badge.success { background: #15803d; color: #dcfce7; }
+.badge.warn { background: #b45309; color: #fef3c7; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 1.5rem; margin-bottom: 1.5rem; align-items: start; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 0.75rem; padding: 1.25rem; transition: padding 0.15s ease; }
+.card h2 { font-size: 1.1rem; margin-bottom: 1rem; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; display:flex; justify-content:space-between; align-items:center; cursor: pointer; user-select: none; }
+.card h2:hover { color: #7dd3fc; }
+.turnstile { display: inline-block; font-size: 0.8rem; margin-right: 0.45rem; color: var(--accent); }
+.card.collapsed { padding-top: 0.85rem; padding-bottom: 0.85rem; }
+.card.collapsed h2 { margin-bottom: 0; border-bottom: none; padding-bottom: 0; }
+.card.collapsed .card-body { display: none; }
+.metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; text-align: center; margin-bottom: 1rem; }
+.metric { background: #0f172a; padding: 0.75rem; border-radius: 0.5rem; border: 1px solid var(--border); }
+.metric .val { font-size: 1.7rem; font-weight: bold; }
+.metric .lbl { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; margin-top: 0.25rem; }
+.status-bar { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0.75rem; background: #0f172a; border-radius: 0.5rem; margin-bottom: 1rem; font-size: 0.9rem; }
+button { background: #0284c7; color: white; border: none; border-radius: 0.4rem; padding: 0.5rem 1rem; font-weight: 600; cursor: pointer; transition: 0.15s; }
+button:hover { background: #0369a1; }
+button.danger { background: #b91c1c; }
+button.danger:hover { background: #991b1b; }
+button.success { background: #15803d; }
+button.success:hover { background: #166534; }
+select, input, textarea { width: 100%; background: #0f172a; border: 1px solid var(--border); color: white; padding: 0.5rem; border-radius: 0.4rem; margin-bottom: 0.75rem; font-family: monospace; font-size: 0.9rem; }
+textarea { height: 160px; resize: vertical; }
+.console { background: #020617; border: 1px solid var(--border); border-radius: 0.5rem; padding: 0.75rem; height: 160px; overflow-y: auto; font-family: monospace; font-size: 0.85rem; color: #a7f3d0; white-space: pre-wrap; }
+.btn-row { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; }
+.toggle-row { display: flex; justify-content: space-between; align-items: center; background: #0f172a; border: 1px solid var(--border); border-radius: 0.5rem; padding: 0.6rem 0.75rem; margin-top: 0.5rem; font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>🏴‍☠️ ESPirate Hardware Sequencer</h1>
+    <div style="color:#94a3b8; font-size:0.85rem; margin-top:0.25rem;">ESP32-S3 | Exclusive AP / STA Mode | 8MB Octal PSRAM | LittleFS</div>
+  </div>
+  <div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
+    <span class="badge" id="mode-badge">Mode: AP</span>
+    <span class="badge" id="ap-info">AP: ESPirate</span>
+    <a id="mdns-badge" class="badge success" href="#" target="_blank" style="text-decoration:none;">mDNS: espirate.local</a>
+  </div>
+</header>
+
+<div class="grid">
+  <!-- Telemetry Card -->
+  <div class="card" id="card-telemetry">
+    <h2 onclick="toggleCard('card-telemetry')">
+      <span><span class="turnstile">▼</span> Hardware Test Telemetry</span>
+    </h2>
+    <div class="card-body">
+      <div class="metrics">
+        <div class="metric"><div class="val" id="telem-total">0</div><div class="lbl">Total Cycles</div></div>
+        <div class="metric"><div class="val" id="telem-pass" style="color:var(--pass);">0</div><div class="lbl">Passed</div></div>
+        <div class="metric"><div class="val" id="telem-fail" style="color:var(--fail);">0</div><div class="lbl">Failed</div></div>
+      </div>
+      <div class="status-bar">
+        <span>Execution Status:</span>
+        <strong id="telem-status" style="color:var(--accent);">IDLE</strong>
+      </div>
+      <div class="btn-row">
+        <button onclick="resetTelemetry()">Clear Telemetry</button>
+        <button class="danger" onclick="resetLuaVM()">Reset Lua VM</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Wi-Fi Network & Mode Settings Card -->
+  <div class="card" id="card-wifi">
+    <h2 onclick="toggleCard('card-wifi')">
+      <span><span class="turnstile">▼</span> Wi-Fi Network Configuration</span>
+      <span class="badge" id="sta-status-badge" onclick="event.stopPropagation()">AP Mode</span>
+    </h2>
+    <div class="card-body">
+      <div class="status-bar">
+        <span>Mode: <strong id="active-mode-display" style="color:var(--accent);">AP</strong></span>
+        <span>IP: <strong id="active-ip-display" style="color:var(--accent); font-family:monospace;">192.168.4.1</strong></span>
+        <span>mDNS: <a id="mdns-link" href="#" target="_blank" style="color:var(--accent); text-decoration:underline;">espirate.local</a></span>
+      </div>
+      <div class="btn-row" style="margin-bottom: 0.75rem;">
+        <button id="btn-mode-ap" onclick="switchWifiMode('ap')" style="flex:1;">Switch to AP</button>
+        <button id="btn-mode-sta" onclick="switchWifiMode('sta')" style="flex:1; background:#334155;">Switch to STA</button>
+      </div>
+      <div style="font-size:0.8rem; color:#94a3b8; margin-bottom:0.25rem;">Soft-AP Network SSID:</div>
+      <div class="btn-row">
+        <input type="text" id="wifi-ap-ssid" placeholder="Soft-AP SSID (e.g. ESPirate-CEA0)" style="margin-bottom:0;">
+        <button onclick="saveApSsid()">Save AP</button>
+      </div>
+      <div style="font-size:0.8rem; color:#94a3b8; margin-top:0.4rem; margin-bottom:0.25rem;">Station (STA) Credentials:</div>
+      <input type="text" id="wifi-sta-ssid" placeholder="Wi-Fi Network SSID to join">
+      <input type="password" id="wifi-sta-pass" placeholder="Wi-Fi Password (stored safely)">
+      <div class="btn-row">
+        <button class="success" onclick="saveAndConnectWifi()">📡 Connect & Switch to STA</button>
+        <button class="danger" onclick="forgetWifi()">Forget STA</button>
+      </div>
+      <div class="toggle-row">
+        <span>Pretend Internet Connectivity (Android 17 / 204 Probe)</span>
+        <input type="checkbox" id="fake-internet-toggle" onchange="toggleFakeInternet(this.checked)" style="width:auto; margin:0; cursor:pointer;">
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="grid">
+  <!-- Test Sequencer Card -->
+  <div class="card" id="card-sequencer">
+    <h2 onclick="toggleCard('card-sequencer')">
+      <span><span class="turnstile">▼</span> Sequencer Execution</span>
+    </h2>
+    <div class="card-body">
+      <label style="font-size:0.8rem; color:#94a3b8;">Select Script from /lfs:</label>
+      <select id="script-select" onchange="loadSelectedScript()"></select>
+      <div class="btn-row">
+        <button class="success" onclick="runScript(true)">▶ Run (Background)</button>
+        <button onclick="runScript(false)">Run (Sync)</button>
+      </div>
+      <div class="console" id="run-console">System ready. Select a script to execute.</div>
+    </div>
+  </div>
+
+  <!-- Script Editor Card -->
+  <div class="card" id="card-storage">
+    <h2 onclick="toggleCard('card-storage')">
+      <span><span class="turnstile">▼</span> LittleFS Storage & Scripts</span>
+      <span class="badge" id="storage-badge" onclick="event.stopPropagation()">LittleFS</span>
+    </h2>
+    <div class="card-body">
+      <div style="font-size:0.8rem; color:#94a3b8; margin-bottom:0.5rem;" id="storage-summary">Storage: Loading...</div>
+      <div class="btn-row" style="margin-bottom:0.5rem; flex-wrap:wrap;">
+        <input type="text" id="script-filename" placeholder="/lfs/myscript.lua" style="margin-bottom:0; flex:2; min-width:140px;">
+        <button onclick="newScript()" title="Create new script">➕ New</button>
+        <button onclick="saveScript()" title="Save to LittleFS">💾 Save</button>
+        <button onclick="renameScript()" title="Rename current script">✏️ Rename</button>
+        <button class="danger" onclick="deleteScript()" title="Delete script">🗑️ Del</button>
+        <button onclick="refreshScripts()" title="Refresh file list">🔄</button>
+      </div>
+      <textarea id="script-content" placeholder="-- Enter Lua test script here..."></textarea>
+    </div>
+  </div>
+</div>
+
+<div class="grid">
+  <!-- Interactive Lua REPL Card -->
+  <div class="card" id="card-repl" style="grid-column: 1 / -1;">
+    <h2 onclick="toggleCard('card-repl')">
+      <span><span class="turnstile">▼</span> Interactive Lua Command (REPL)</span>
+    </h2>
+    <div class="card-body">
+      <div class="btn-row">
+        <input type="text" id="lua-eval-input" placeholder="e.g. gpio.high(4) or print(sys.uptime())" style="margin-bottom:0;" onkeydown="if(event.key==='Enter')evalLua()">
+        <button onclick="evalLua()">⚡ Eval</button>
+      </div>
+      <div class="console" id="eval-console">Interactive Lua console ready.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+function log(cId, msg) {
+  const c = document.getElementById(cId);
+  c.textContent += (c.textContent ? '\n' : '') + msg;
+  c.scrollTop = c.scrollHeight;
+}
+
+function toggleCard(cardId) {
+  const c = document.getElementById(cardId);
+  if (!c) return;
+  const isCollapsed = c.classList.toggle('collapsed');
+  const t = c.querySelector('.turnstile');
+  if (t) t.textContent = isCollapsed ? '▶' : '▼';
+}
+
+async function fetchTelemetry() {
+  try {
+    const res = await fetch('/api/telemetry');
+    if (res.ok) {
+      const data = await res.json();
+      document.getElementById('telem-total').innerText = data.total || 0;
+      document.getElementById('telem-pass').innerText = data.pass || 0;
+      document.getElementById('telem-fail').innerText = data.fail || 0;
+      document.getElementById('telem-status').innerText = data.status || 'IDLE';
+    }
+  } catch (e) {}
+}
+
+async function switchWifiMode(mode) {
+  log('run-console', '[Wi-Fi] Switching mode to ' + mode.toUpperCase() + '...');
+  const res = await fetch('/api/wifi/mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: mode })
+  });
+  if (res.ok) {
+    log('run-console', '[Wi-Fi] Mode switch request submitted: ' + mode.toUpperCase());
+    setTimeout(fetchWifi, 1500);
+  } else {
+    const txt = await res.text();
+    log('run-console', '[Wi-Fi] Switch error: ' + txt);
+    alert('Mode switch failed: ' + txt);
+  }
+}
+
+async function saveApSsid() {
+  const ssid = document.getElementById('wifi-ap-ssid').value.trim();
+  if (!ssid) return alert('Enter Soft-AP SSID');
+  log('run-console', '[Wi-Fi] Setting Soft-AP SSID to ' + ssid + '...');
+  const res = await fetch('/api/wifi', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ap_ssid: ssid })
+  });
+  if (res.ok) {
+    log('run-console', '[Wi-Fi] Soft-AP SSID updated.');
+    setTimeout(fetchWifi, 1000);
+  }
+}
+
+async function fetchWifi() {
+  try {
+    const res = await fetch('/api/wifi');
+    if (res.ok) {
+      const data = await res.json();
+      const mode = data.mode || 'AP';
+      document.getElementById('mode-badge').innerText = 'Mode: ' + mode;
+      document.getElementById('active-mode-display').innerText = mode;
+      const btnAp = document.getElementById('btn-mode-ap');
+      const btnSta = document.getElementById('btn-mode-sta');
+      if (mode === 'AP') {
+        btnAp.style.background = '#0284c7';
+        btnSta.style.background = '#334155';
+        document.getElementById('active-ip-display').innerText = (data.ap ? data.ap.ip : '192.168.4.1');
+      } else {
+        btnAp.style.background = '#334155';
+        btnSta.style.background = '#0284c7';
+        document.getElementById('active-ip-display').innerText = (data.sta && data.sta.connected) ? data.sta.ip : '0.0.0.0';
+      }
+      if (data.ap) {
+        document.getElementById('ap-info').innerText = 'AP: ' + data.ap.ssid + ' (' + data.ap.clients + ' clients)';
+        if (!document.getElementById('wifi-ap-ssid').value) {
+          document.getElementById('wifi-ap-ssid').value = data.ap.ssid;
+        }
+      }
+      if (data.mdns) {
+        const url = 'http://' + data.mdns;
+        const ml = document.getElementById('mdns-link');
+        ml.innerText = data.mdns;
+        ml.href = url;
+        const mb = document.getElementById('mdns-badge');
+        mb.innerText = 'mDNS: ' + data.mdns;
+        mb.href = url;
+      }
+      if (data.sta) {
+        const badge = document.getElementById('sta-status-badge');
+        if (mode === 'STA') {
+          if (data.sta.connected) {
+            badge.innerText = 'Connected: ' + data.sta.ssid;
+            badge.className = 'badge success';
+          } else {
+            badge.innerText = 'Connecting to ' + (data.sta.ssid || 'AP') + '...';
+            badge.className = 'badge warn';
+          }
+        } else {
+          badge.innerText = 'AP Mode (' + (data.ap ? data.ap.clients : 0) + ' clients)';
+          badge.className = 'badge success';
+        }
+        if (data.sta.ssid && !document.getElementById('wifi-sta-ssid').value) {
+          document.getElementById('wifi-sta-ssid').value = data.sta.ssid;
+        }
+      }
+      if (typeof data.fake_internet === 'boolean') {
+        document.getElementById('fake-internet-toggle').checked = data.fake_internet;
+      }
+    }
+  } catch (e) {}
+}
+
+async function saveAndConnectWifi() {
+  const ssid = document.getElementById('wifi-sta-ssid').value.trim();
+  const pass = document.getElementById('wifi-sta-pass').value;
+  if (!ssid) return alert('Please enter Wi-Fi SSID');
+  log('run-console', '[Wi-Fi] Connecting to ' + ssid + '...');
+  const res = await fetch('/api/wifi', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ssid: ssid, password: pass })
+  });
+  document.getElementById('wifi-sta-pass').value = '';
+  if (res.ok) {
+    log('run-console', '[Wi-Fi] Credentials saved and connection initiated.');
+    setTimeout(fetchWifi, 1500);
+  } else {
+    log('run-console', '[Wi-Fi] Error initiating connection.');
+  }
+}
+
+async function forgetWifi() {
+  if (!confirm('Forget saved Wi-Fi credentials?')) return;
+  const res = await fetch('/api/wifi/forget', { method: 'POST' });
+  if (res.ok) {
+    document.getElementById('wifi-sta-ssid').value = '';
+    document.getElementById('wifi-sta-pass').value = '';
+    log('run-console', '[Wi-Fi] Credentials forgotten and disconnected.');
+    fetchWifi();
+  }
+}
+
+async function toggleFakeInternet(enable) {
+  const res = await fetch('/api/wifi/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fake_internet: enable })
+  });
+  if (res.ok) {
+    log('run-console', '[Pretend Internet] ' + (enable ? 'Enabled (204 Probe active)' : 'Disabled'));
+  }
+}
+
+async function resetTelemetry() {
+  await fetch('/api/telemetry/reset', { method: 'POST' });
+  fetchTelemetry();
+}
+
+async function resetLuaVM() {
+  await fetch('/api/reset', { method: 'POST' });
+  log('run-console', '[System] Lua VM reset requested.');
+}
+
+async function refreshStorage() {
+  try {
+    const res = await fetch('/api/storage');
+    if (res.ok) {
+      const data = await res.json();
+      if (data.mounted) {
+        const totalKb = Math.round(data.total_bytes / 1024);
+        const usedKb = Math.round(data.used_bytes / 1024);
+        const freeKb = Math.round(data.free_bytes / 1024);
+        const chipMb = data.chip_size_mb || 0;
+        document.getElementById('storage-badge').innerText = (chipMb ? (chipMb + ' MB Flash') : (totalKb >= 1024 ? (Math.round(totalKb/1024) + ' MB') : (totalKb + ' KB')));
+        document.getElementById('storage-summary').innerText = 'Usage: ' + usedKb + ' KB used / ' + freeKb + ' KB free (Total: ' + totalKb + ' KB)';
+      }
+    }
+  } catch (e) {}
+}
+
+async function refreshScripts() {
+  try {
+    refreshStorage();
+    const res = await fetch('/api/scripts');
+    if (res.ok) {
+      const files = await res.json();
+      const sel = document.getElementById('script-select');
+      const curVal = sel.value;
+      sel.innerHTML = '';
+      files.forEach(f => {
+        const opt = document.createElement('option');
+        opt.value = f.name;
+        opt.text = f.name + ' (' + f.size + ' B)';
+        sel.appendChild(opt);
+      });
+      if (files.length > 0) {
+        if (curVal && files.some(f => f.name === curVal)) {
+          sel.value = curVal;
+        } else {
+          loadSelectedScript();
+        }
+      }
+    }
+  } catch (e) {}
+}
+
+function newScript() {
+  document.getElementById('script-filename').value = '/lfs/new_script.lua';
+  document.getElementById('script-content').value = '-- New ESPirate Lua Script\nprint("Hello from new script!")\n';
+  document.getElementById('script-content').focus();
+}
+
+async function renameScript() {
+  const cur = document.getElementById('script-filename').value.trim();
+  if (!cur) return alert('No file selected');
+  const baseName = cur.startsWith('/lfs/') ? cur.substring(5) : cur;
+  const newName = prompt('Enter new filename for ' + baseName + ':', baseName);
+  if (!newName || newName === baseName) return;
+  const res = await fetch('/api/script/rename', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ old_name: baseName, new_name: newName })
+  });
+  if (res.ok) {
+    log('run-console', '[Storage] Renamed ' + baseName + ' to ' + newName);
+    await refreshScripts();
+    document.getElementById('script-filename').value = '/lfs/' + newName;
+  } else {
+    alert('Failed to rename script');
+  }
+}
+
+async function deleteScript() {
+  const cur = document.getElementById('script-filename').value.trim();
+  if (!cur) return alert('No file selected');
+  const baseName = cur.startsWith('/lfs/') ? cur.substring(5) : cur;
+  if (!confirm('Are you sure you want to delete ' + baseName + '?')) return;
+  const res = await fetch('/api/script/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: baseName })
+  });
+  if (res.ok) {
+    log('run-console', '[Storage] Deleted ' + baseName);
+    document.getElementById('script-filename').value = '';
+    document.getElementById('script-content').value = '';
+    refreshScripts();
+  } else {
+    alert('Failed to delete script');
+  }
+}
+
+async function loadSelectedScript() {
+  const sel = document.getElementById('script-select');
+  if (!sel.value) return;
+  const res = await fetch('/api/script?name=' + encodeURIComponent(sel.value));
+  if (res.ok) {
+    const text = await res.text();
+    document.getElementById('script-filename').value = '/lfs/' + sel.value;
+    document.getElementById('script-content').value = text;
+  }
+}
+
+async function saveScript() {
+  const fn = document.getElementById('script-filename').value;
+  const content = document.getElementById('script-content').value;
+  if (!fn) return alert('Enter filename');
+  const res = await fetch('/api/script', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: fn, content: content })
+  });
+  if (res.ok) {
+    log('run-console', '[Storage] Saved ' + fn);
+    refreshScripts();
+  } else {
+    log('run-console', '[Storage] Error saving ' + fn);
+  }
+}
+
+async function runScript(bg) {
+  const sel = document.getElementById('script-select');
+  if (!sel.value) return;
+  const path = '/lfs/' + sel.value;
+  log('run-console', '[Trigger] Executing ' + path + (bg ? ' in background...' : ' synchronously...'));
+  const res = await fetch('/api/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file: path, bg: bg })
+  });
+  const txt = await res.text();
+  log('run-console', txt);
+}
+
+async function evalLua() {
+  const inp = document.getElementById('lua-eval-input');
+  const code = inp.value.trim();
+  if (!code) return;
+  log('eval-console', '> ' + code);
+  inp.value = '';
+  const res = await fetch('/api/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code: code, bg: false })
+  });
+  const txt = await res.text();
+  log('eval-console', txt);
+}
+
+setInterval(fetchTelemetry, 1000);
+setInterval(fetchWifi, 3000);
+refreshScripts();
+fetchTelemetry();
+fetchWifi();
+</script>
+</body>
+</html>

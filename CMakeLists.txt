@@ -5,10 +5,34 @@ set(ENV{ZEPHYR_BASE} "/home/alan/zephyr-projects/zephyr")
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(espirate)
 
+# Web Dashboard Generator: converts web/index.html -> web_dashboard.h
+set(WEB_HTML_FILE ${CMAKE_CURRENT_SOURCE_DIR}/web/index.html)
+set(GEN_WEB_HEADER ${CMAKE_CURRENT_BINARY_DIR}/include/web_dashboard.h)
+set(GEN_WEB_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/scripts/generate_web_dashboard.py)
+
+# Generate at CMake configure time if not already present or out of date
+execute_process(
+  COMMAND ${PYTHON_EXECUTABLE} ${GEN_WEB_SCRIPT} ${WEB_HTML_FILE} ${GEN_WEB_HEADER}
+)
+
+# Custom command to regenerate during build whenever web/index.html or the generator changes
+add_custom_command(
+  OUTPUT ${GEN_WEB_HEADER}
+  COMMAND ${PYTHON_EXECUTABLE} ${GEN_WEB_SCRIPT} ${WEB_HTML_FILE} ${GEN_WEB_HEADER}
+  DEPENDS ${WEB_HTML_FILE} ${GEN_WEB_SCRIPT}
+  COMMENT "Generating web_dashboard.h from ${WEB_HTML_FILE}"
+  VERBATIM
+)
+
+# Custom target ensuring header is generated before any target compiles
+add_custom_target(generate_web_dashboard DEPENDS ${GEN_WEB_HEADER})
+add_dependencies(app generate_web_dashboard)
+
 # Include directories
 target_include_directories(app PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/lua
+  ${CMAKE_CURRENT_BINARY_DIR}/include
 )
 
 # Lua Engine Sources
@@ -60,6 +84,7 @@ target_sources(app PRIVATE
   src/web_server.c
   src/posix_stubs.c
   src/setjmp.S
+  ${GEN_WEB_HEADER}
   ${LUA_SOURCES}
 )
 
