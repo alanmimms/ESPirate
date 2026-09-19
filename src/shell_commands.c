@@ -335,14 +335,189 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_espirate,
 SHELL_CMD_REGISTER(espirate, &sub_espirate, "ESPirate commands", NULL);
 
 /* ========================================================================= */
+/*                       'storage' SHELL COMMANDS                            */
+/* ========================================================================= */
+
+#include <zephyr/fs/fs.h>
+#include <esp_flash.h>
+
+static int cmd_storage_status(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    if (!fs_manager_is_mounted()) {
+        shell_print(sh, "LittleFS status: UNMOUNTED");
+        return 0;
+    }
+
+    size_t total = 0, free_b = 0;
+    int rc = fs_manager_statvfs(&total, &free_b);
+    if (rc != 0) {
+        shell_error(sh, "Failed to get LittleFS filesystem stats: %d", rc);
+        return rc;
+    }
+
+    uint32_t chip_size = 0;
+    esp_flash_get_size(NULL, &chip_size);
+
+    size_t used = (total >= free_b) ? (total - free_b) : 0;
+    shell_print(sh, "=== LittleFS Storage Subsystem ===");
+    shell_print(sh, "  Mount Point : %s", ESPIRATE_FS_MOUNT_POINT);
+    shell_print(sh, "  State       : MOUNTED");
+    shell_print(sh, "  Total Space : %zu KB (%zu bytes)", total / 1024, total);
+    shell_print(sh, "  Used Space  : %zu KB (%zu bytes)", used / 1024, used);
+    shell_print(sh, "  Free Space  : %zu KB (%zu bytes)", free_b / 1024, free_b);
+    if (chip_size > 0) {
+        shell_print(sh, "  Flash Chip  : %u MB physical SPI Flash", chip_size / (1024 * 1024));
+        shell_print(sh, "  Partition   : Dynamic (0x200000 -> 0x%08X)", chip_size);
+    } else {
+        shell_print(sh, "  Partition   : 2 MB baseline at offset 0x200000");
+    }
+    return 0;
+}
+
+static int cmd_storage_ls(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    if (!fs_manager_is_mounted()) {
+        shell_error(sh, "LittleFS is not mounted");
+        return -ENODEV;
+    }
+
+    struct fs_dir_t dir;
+    fs_dir_t_init(&dir);
+
+    int rc = fs_opendir(&dir, ESPIRATE_FS_MOUNT_POINT);
+    if (rc != 0) {
+        shell_error(sh, "Failed to open directory %s: %d", ESPIRATE_FS_MOUNT_POINT, rc);
+        return rc;
+    }
+
+    shell_print(sh, "Files in %s:", ESPIRATE_FS_MOUNT_POINT);
+    shell_print(sh, "  %-24s %10s", "Name", "Size (bytes)");
+    shell_print(sh, "  %-24s %10s", "------------------------", "----------");
+
+    struct fs_dirent entry;
+    size_t count = 0;
+    size_t total_size = 0;
+
+    while (fs_readdir(&dir, &entry) == 0 && entry.name[0] != 0) {
+        if (entry.type == FS_DIR_ENTRY_FILE) {
+            shell_print(sh, "  %-24s %10zu", entry.name, entry.size);
+            count++;
+            total_size += entry.size;
+        }
+    }
+    fs_closedir(&dir);
+
+    shell_print(sh, "  %-24s %10s", "------------------------", "----------");
+    shell_print(sh, "  Total: %zu file(s), %zu bytes", count, total_size);
+    return 0;
+}
+
+static int cmd_storage_cat(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 2) {
+        shell_error(sh, "Usage: storage cat <filename>");
+        return -EINVAL;
+    }
+
+    static char buf[2048];
+    size_t bytes_read = 0;
+    int rc = fs_manager_read_file(argv[1], buf, sizeof(buf) - 1, &bytes_read);
+    if (rc != 0) {
+        shell_error(sh, "Failed to read file '%s': %d", argv[1], rc);
+        return rc;
+    }
+
+    buf[bytes_read] = '\0';
+    shell_print(sh, "%s", buf);
+    return 0;
+}
+
+static int cmd_storage_rm(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 2) {
+        shell_error(sh, "Usage: storage rm <filename>");
+        return -EINVAL;
+    }
+
+    int rc = fs_manager_delete_file(argv[1]);
+    if (rc == 0) {
+        shell_print(sh, "Deleted file: %s", argv[1]);
+    } else {
+        shell_error(sh, "Failed to delete file '%s': %d", argv[1], rc);
+    }
+    return rc;
+}
+
+static int cmd_storage_rename(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 3) {
+        shell_error(sh, "Usage: storage rename <old_name> <new_name>");
+        return -EINVAL;
+    }
+
+    int rc = fs_manager_rename_file(argv[1], argv[2]);
+    if (rc == 0) {
+        shell_print(sh, "Renamed '%s' to '%s'", argv[1], argv[2]);
+    } else {
+        shell_error(sh, "Failed to rename '%s' to '%s': %d", argv[1], argv[2], rc);
+    }
+    return rc;
+}
+
+static int cmd_storage_format(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    shell_print(sh, "Formatting LittleFS partition...");
+    int rc = fs_manager_format();
+    if (rc == 0) {
+        shell_print(sh, "LittleFS successfully formatted and remounted at %s.", ESPIRATE_FS_MOUNT_POINT);
+    } else {
+        shell_error(sh, "Failed to format LittleFS: %d", rc);
+    }
+    return rc;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_storage,
+    SHELL_CMD(status, NULL, "Show storage statistics: storage status", cmd_storage_status),
+    SHELL_CMD(ls, NULL, "List files in LittleFS: storage ls", cmd_storage_ls),
+    SHELL_CMD(cat, NULL, "Print file contents: storage cat <filename>", cmd_storage_cat),
+    SHELL_CMD(rm, NULL, "Delete file: storage rm <filename>", cmd_storage_rm),
+    SHELL_CMD(rename, NULL, "Rename file: storage rename <old> <new>", cmd_storage_rename),
+    SHELL_CMD(format, NULL, "Reformat LittleFS: storage format", cmd_storage_format),
+    SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(storage, &sub_storage, "LittleFS storage commands", NULL);
+
+/* ========================================================================= */
 /*                          'lua' SHELL COMMAND                              */
 /* ========================================================================= */
 
 static int cmd_lua(const struct shell *sh, size_t argc, char **argv)
 {
     if (argc < 2) {
-        shell_error(sh, "Usage: lua \"<code>\" | lua run <file> | lua bg <file> | lua status | lua reset");
+        shell_error(sh, "Usage: lua \"<code>\" | lua run <file> | lua ls | lua cat <file> | lua rm <file> | lua status | lua reset");
         return -EINVAL;
+    }
+
+    if (argc >= 2 && strcmp(argv[1], "ls") == 0) {
+        return cmd_storage_ls(sh, argc - 1, argv + 1);
+    }
+
+    if (argc >= 3 && strcmp(argv[1], "cat") == 0) {
+        return cmd_storage_cat(sh, argc - 1, argv + 1);
+    }
+
+    if (argc >= 3 && strcmp(argv[1], "rm") == 0) {
+        return cmd_storage_rm(sh, argc - 1, argv + 1);
     }
 
     if (argc == 2 && strcmp(argv[1], "status") == 0) {

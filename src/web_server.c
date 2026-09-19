@@ -256,7 +256,7 @@ static void handle_api_telemetry(int sock)
 
 static void handle_api_scripts_list(int sock)
 {
-    char resp[1024];
+    static char resp[4096];
     size_t pos = 0;
     pos += snprintf(resp + pos, sizeof(resp) - pos, "[");
 
@@ -347,6 +347,92 @@ static void handle_api_save_script(int sock, const char *body)
     }
 
     send_http_response(sock, 200, "application/json", "{\"status\":\"saved\"}", 18);
+}
+
+static void handle_api_delete_script(int sock, const char *body, const char *path)
+{
+    char name[128] = {0};
+    if (body && strlen(body) > 0) {
+        extract_json_str(body, "name", name, sizeof(name));
+    }
+    if (strlen(name) == 0 && path) {
+        const char *name_param = strstr(path, "name=");
+        if (name_param) {
+            name_param += 5;
+            size_t i = 0;
+            while (*name_param && *name_param != '&' && i < sizeof(name) - 1) {
+                name[i++] = *name_param++;
+            }
+        }
+    }
+
+    if (strlen(name) == 0) {
+        send_http_response(sock, 400, "text/plain", "Missing file name", 17);
+        return;
+    }
+
+    int rc = fs_manager_delete_file(name);
+    if (rc != 0) {
+        send_http_response(sock, 500, "text/plain", "Failed to delete file", 21);
+        return;
+    }
+
+    send_http_response(sock, 200, "application/json", "{\"status\":\"deleted\"}", 20);
+}
+
+static void handle_api_rename_script(int sock, const char *body)
+{
+    char old_name[128] = {0};
+    char new_name[128] = {0};
+
+    extract_json_str(body, "old_name", old_name, sizeof(old_name));
+    if (strlen(old_name) == 0) {
+        extract_json_str(body, "src", old_name, sizeof(old_name));
+    }
+    extract_json_str(body, "new_name", new_name, sizeof(new_name));
+    if (strlen(new_name) == 0) {
+        extract_json_str(body, "dest", new_name, sizeof(new_name));
+    }
+
+    if (strlen(old_name) == 0 || strlen(new_name) == 0) {
+        send_http_response(sock, 400, "text/plain", "Missing old_name or new_name", 28);
+        return;
+    }
+
+    int rc = fs_manager_rename_file(old_name, new_name);
+    if (rc != 0) {
+        send_http_response(sock, 500, "text/plain", "Failed to rename file", 21);
+        return;
+    }
+
+    send_http_response(sock, 200, "application/json", "{\"status\":\"renamed\"}", 20);
+}
+
+static void handle_api_storage(int sock)
+{
+    size_t total = 0, free_b = 0;
+    int rc = fs_manager_statvfs(&total, &free_b);
+    char json[256];
+    if (rc == 0) {
+        size_t used = (total >= free_b) ? (total - free_b) : 0;
+        int len = snprintf(json, sizeof(json),
+            "{\"mounted\":true,\"mount_point\":\"%s\",\"total_bytes\":%zu,\"free_bytes\":%zu,\"used_bytes\":%zu}",
+            ESPIRATE_FS_MOUNT_POINT, total, free_b, used);
+        send_http_response(sock, 200, "application/json", json, len);
+    } else {
+        int len = snprintf(json, sizeof(json), "{\"mounted\":false,\"error\":%d}", rc);
+        send_http_response(sock, 500, "application/json", json, len);
+    }
+}
+
+static void handle_api_storage_format(int sock)
+{
+    int rc = fs_manager_format();
+    if (rc == 0) {
+        send_http_response(sock, 200, "application/json", "{\"status\":\"formatted\"}", 22);
+    } else {
+        send_http_response(sock, 500, "text/plain", "Format failed", 13);
+    }
 }
 
 static void handle_api_run(int sock, const char *body)
@@ -559,6 +645,8 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
                     handle_api_telemetry(client_fd);
                 } else if (strcmp(clean_path, "/api/scripts") == 0) {
                     handle_api_scripts_list(client_fd);
+                } else if (strcmp(clean_path, "/api/storage") == 0) {
+                    handle_api_storage(client_fd);
                 } else if (strncmp(clean_path, "/api/script", 11) == 0) {
                     handle_api_get_script(client_fd, req_path);
                 } else {
@@ -583,8 +671,20 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
                     send_http_response(client_fd, 200, "application/json", "{\"status\":\"reset\"}", 18);
                 } else if (strcmp(clean_path, "/api/script") == 0) {
                     handle_api_save_script(client_fd, body);
+                } else if (strcmp(clean_path, "/api/script/delete") == 0 || strcmp(clean_path, "/api/file/delete") == 0) {
+                    handle_api_delete_script(client_fd, body, req_path);
+                } else if (strcmp(clean_path, "/api/script/rename") == 0 || strcmp(clean_path, "/api/file/rename") == 0) {
+                    handle_api_rename_script(client_fd, body);
+                } else if (strcmp(clean_path, "/api/storage/format") == 0) {
+                    handle_api_storage_format(client_fd);
                 } else if (strcmp(clean_path, "/api/run") == 0) {
                     handle_api_run(client_fd, body);
+                } else {
+                    send_http_response(client_fd, 404, "text/plain", "Not Found", 9);
+                }
+            } else if (strcmp(method, "DELETE") == 0) {
+                if (strncmp(clean_path, "/api/script", 11) == 0 || strncmp(clean_path, "/api/file", 9) == 0) {
+                    handle_api_delete_script(client_fd, body, req_path);
                 } else {
                     send_http_response(client_fd, 404, "text/plain", "Not Found", 9);
                 }

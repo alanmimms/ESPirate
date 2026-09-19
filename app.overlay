@@ -18,3 +18,28 @@
 &wifi {
     status = "okay";
 };
+
+/* LittleFS Storage Partition baseline: 0x200000 (2MB offset).
+ * On 4MB chip: 2MB LittleFS (0x200000 - 0x400000).
+ * On 8MB chip: 6MB LittleFS (0x200000 - 0x800000, dynamically expanded at runtime).
+ * On 16MB chip: 14MB LittleFS (0x200000 - 0x1000000, dynamically expanded at runtime).
+ */
+/delete-node/ &storage_partition;
+/delete-node/ &slot1_partition;
+/delete-node/ &slot0_appcpu_partition;
+/delete-node/ &slot1_appcpu_partition;
+/delete-node/ &slot0_lpcore_partition;
+/delete-node/ &slot1_lpcore_partition;
+/delete-node/ &scratch_partition;
+/delete-node/ &coredump_partition;
+
+&flash0 {
+    partitions {
+        storage_partition: partition@200000 {
+            label = "storage";
+            reg = <0x00200000 DT_SIZE_M(2)>;
+        };
+    };
+};
+
+

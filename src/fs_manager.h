@@ -15,8 +15,14 @@ extern "C" {
 
 #define ESPIRATE_FS_MOUNT_POINT "/lfs"
 
+typedef struct {
+    char name[64];
+    size_t size;
+} fs_file_info_t;
+
 /**
  * @brief Initialize and mount the LittleFS partition at /lfs.
+ * If mounting fails (e.g. on fresh chip), auto-formats the partition.
  * @return 0 on success, negative error code on failure.
  */
 int fs_manager_init(void);
@@ -26,6 +32,20 @@ int fs_manager_init(void);
  * @return true if mounted, false otherwise.
  */
 bool fs_manager_is_mounted(void);
+
+/**
+ * @brief Reformat the LittleFS partition and recreate default files.
+ * @return 0 on success, negative error code on failure.
+ */
+int fs_manager_format(void);
+
+/**
+ * @brief Get filesystem capacity and free space statistics.
+ * @param total_bytes Pointer to store total capacity in bytes.
+ * @param free_bytes Pointer to store free space in bytes.
+ * @return 0 on success, negative error code on failure.
+ */
+int fs_manager_statvfs(size_t *total_bytes, size_t *free_bytes);
 
 /**
  * @brief Write data to a file in LittleFS.
@@ -45,6 +65,35 @@ int fs_manager_write_file(const char *path, const void *data, size_t len);
  * @return 0 on success, negative error code on failure.
  */
 int fs_manager_read_file(const char *path, void *buf, size_t buf_size, size_t *bytes_read);
+
+/**
+ * @brief Delete (unlink) a file in LittleFS.
+ * @param path File path or filename (e.g. "test.lua" or "/lfs/test.lua").
+ * @return 0 on success, negative error code on failure.
+ */
+int fs_manager_delete_file(const char *path);
+
+/**
+ * @brief Rename a file in LittleFS.
+ * @param old_path Current path or filename.
+ * @param new_path Target path or filename.
+ * @return 0 on success, negative error code on failure.
+ */
+int fs_manager_rename_file(const char *old_path, const char *new_path);
+
+/**
+ * @brief List files in LittleFS mount point.
+ * @param files Buffer to store file info structures (may be NULL if max_files is 0).
+ * @param max_files Maximum number of entries to store.
+ * @param count Pointer to receive actual total count found.
+ * @return 0 on success, negative error code on failure.
+ */
+int fs_manager_list_files(fs_file_info_t *files, size_t max_files, size_t *count);
+
+/**
+ * @brief Ensure default system files exist (e.g. /lfs/demo.lua).
+ */
+void fs_manager_create_default_files(void);
 
 #ifdef __cplusplus
 }
