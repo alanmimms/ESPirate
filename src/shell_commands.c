@@ -145,6 +145,7 @@ static int cmd_wifi_status(const struct shell *sh, size_t argc, char **argv)
         shell_print(sh, "  STA State     : DISCONNECTED (AP Mode Active)");
     }
     shell_print(sh, "  STA SSID      : %s", wifi_manager_get_sta_ssid());
+    shell_print(sh, "  STA Security  : %s", wifi_manager_get_sta_security_str());
     shell_print(sh, "  STA IP Address: %s", wifi_manager_get_sta_ip());
     shell_print(sh, "  Credentials   : %s", wifi_manager_has_saved_sta() ? "[CONFIGURED / SECURED]" : "[NONE]");
     shell_print(sh, "  mDNS Hostname : %s (http://%s)",
@@ -154,6 +155,20 @@ static int cmd_wifi_status(const struct shell *sh, size_t argc, char **argv)
     shell_print(sh, "  Web Server    : %s (http://%s)",
                 web_server_is_running() ? "RUNNING" : "STOPPED",
                 wifi_manager_get_ip());
+    return 0;
+}
+
+static int cmd_wifi_scan(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    shell_print(sh, "Scanning 2.4 GHz Wi-Fi channels... (AP results will appear in log)");
+    int ret = wifi_manager_scan();
+    if (ret != 0) {
+        shell_error(sh, "Failed to start Wi-Fi scan: %d", ret);
+        return ret;
+    }
     return 0;
 }
 
@@ -194,15 +209,16 @@ static int cmd_wifi_mode(const struct shell *sh, size_t argc, char **argv)
 static int cmd_wifi_sta(const struct shell *sh, size_t argc, char **argv)
 {
     if (argc < 2) {
-        shell_error(sh, "Usage: wifi sta <ssid> [password]");
+        shell_error(sh, "Usage: wifi sta <ssid> [password] [wpa2|wpa3|open]");
         return -EINVAL;
     }
 
     const char *ssid = argv[1];
     const char *pass = (argc >= 3) ? argv[2] : NULL;
+    const char *sec  = (argc >= 4) ? argv[3] : "wpa2";
 
-    shell_print(sh, "Saving STA credentials for '%s' and switching to STA mode...", ssid);
-    wifi_manager_set_sta_credentials(ssid, pass, true);
+    shell_print(sh, "Saving STA credentials: SSID='%s', Security='%s', switching to STA mode...", ssid, sec);
+    wifi_manager_set_sta_credentials(ssid, pass, sec, true);
     int ret = wifi_manager_set_mode(ESPIRATE_WIFI_MODE_STA, true);
     if (ret == 0) {
         shell_print(sh, "Station mode initiated (up to %u attempts before fallback to AP).",
@@ -293,10 +309,11 @@ static int cmd_wifi_hostname(const struct shell *sh, size_t argc, char **argv)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_wifi,
     SHELL_CMD(status, NULL, "Show Wi-Fi & mDNS status: wifi status", cmd_wifi_status),
+    SHELL_CMD(scan, NULL, "Scan 2.4 GHz Wi-Fi networks: wifi scan", cmd_wifi_scan),
     SHELL_CMD(mode, NULL, "Get or set Wi-Fi mode: wifi mode <ap|sta>", cmd_wifi_mode),
-    SHELL_CMD(sta, NULL, "Configure & connect STA: wifi sta <ssid> [password]", cmd_wifi_sta),
+    SHELL_CMD(sta, NULL, "Configure & connect STA: wifi sta <ssid> [password] [wpa2|wpa3|open]", cmd_wifi_sta),
     SHELL_CMD(ap, NULL, "Configure & start Soft-AP: wifi ap [ssid]", cmd_wifi_ap),
-    SHELL_CMD(connect, NULL, "Alias for wifi sta: wifi connect <ssid> [password]", cmd_wifi_sta),
+    SHELL_CMD(connect, NULL, "Alias for wifi sta: wifi connect <ssid> [password] [wpa2|wpa3|open]", cmd_wifi_sta),
     SHELL_CMD(disconnect, NULL, "Disconnect STA (reverts to AP): wifi disconnect", cmd_wifi_disconnect),
     SHELL_CMD(forget, NULL, "Forget saved STA credentials: wifi forget", cmd_wifi_forget),
     SHELL_CMD(fake_internet, NULL, "Toggle pretend internet (204 probe): wifi fake_internet <on|off>", cmd_wifi_fake_internet),

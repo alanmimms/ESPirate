@@ -41,7 +41,7 @@ const char *wifi_manager_get_ssid(void); /* AP alias */
 const char *wifi_manager_get_ip(void);   /* Active IP alias */
 
 /* Station (STA) Client Management */
-int wifi_manager_set_sta_credentials(const char *ssid, const char *password, bool save);
+int wifi_manager_set_sta_credentials(const char *ssid, const char *password, const char *security, bool save);
 int wifi_manager_connect_sta(void);
 int wifi_manager_disconnect_sta(void);
 int wifi_manager_forget_sta(void);
@@ -49,8 +49,12 @@ bool wifi_manager_sta_is_connected(void);
 bool wifi_manager_has_saved_sta(void);
 const char *wifi_manager_get_sta_ssid(void);
 const char *wifi_manager_get_sta_ip(void);
+const char *wifi_manager_get_sta_security_str(void);
 uint32_t wifi_manager_get_sta_retry_count(void);
 uint32_t wifi_manager_get_sta_max_retries(void);
+
+/* Wi-Fi Scanning */
+int wifi_manager_scan(void);
 
 /* Hostname & mDNS Identification */
 const char *wifi_manager_get_hostname(void);

@@ -156,9 +156,11 @@ static void handle_api_wifi_post(int sock, const char *body)
     char ap_ssid[64] = {0};
     char ssid[64] = {0};
     char pass[64] = {0};
+    char sec[16] = {0};
     extract_json_str(body, "ap_ssid", ap_ssid, sizeof(ap_ssid));
     extract_json_str(body, "ssid", ssid, sizeof(ssid));
     extract_json_str(body, "password", pass, sizeof(pass));
+    extract_json_str(body, "security", sec, sizeof(sec));
 
     bool updated = false;
 
@@ -168,7 +170,7 @@ static void handle_api_wifi_post(int sock, const char *body)
     }
 
     if (strlen(ssid) > 0) {
-        wifi_manager_set_sta_credentials(ssid, pass, true);
+        wifi_manager_set_sta_credentials(ssid, pass, (strlen(sec) > 0) ? sec : NULL, true);
         send_http_response(sock, 200, "application/json", "{\"status\":\"connecting\"}", 23);
         k_msleep(50);
         wifi_manager_set_mode(ESPIRATE_WIFI_MODE_STA, true);
