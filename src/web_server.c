@@ -250,7 +250,7 @@ static void handle_api_wifi_post(int sock, const char *body)
     if (strlen(ssid) > 0) {
         wifi_manager_set_sta_credentials(ssid, pass, (strlen(sec) > 0) ? sec : NULL, true);
         send_http_response(sock, 200, "application/json", "{\"status\":\"connecting\"}", 23);
-        k_msleep(50);
+        k_msleep(300);
         wifi_manager_set_mode(ESPIRATE_WIFI_MODE_STA, true);
         return;
     }

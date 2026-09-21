@@ -415,6 +415,11 @@ static void sta_retry_work_handler(struct k_work *work)
     LOG_INF("Retrying Station connection to '%s' (attempt %u/%u, security: %s)...",
             s_sta_ssid, s_sta_retry_count, STA_MAX_RETRIES, s_sta_sec_str);
 
+    /* Disconnect previous attempt cleanly to avoid -EALREADY (-120) */
+    net_dhcpv4_stop(s_iface);
+    net_mgmt(NET_REQUEST_WIFI_DISCONNECT, s_iface, NULL, 0);
+    k_msleep(150);
+
     int ret = net_mgmt(NET_REQUEST_WIFI_CONNECT, s_iface, &s_sta_config, sizeof(s_sta_config));
     if (ret != 0) {
         LOG_WRN("NET_REQUEST_WIFI_CONNECT retry failed immediately: %d", ret);
@@ -580,6 +585,11 @@ static void ipv4_mgmt_event_handler(struct net_mgmt_event_callback *cb,
                         k_work_cancel_delayable(&s_sta_retry_work);
                         LOG_INF("Station DHCP bound! IP Address: %s (mDNS: %s)",
                                 s_sta_ip, s_mdns_domain);
+                        /* Remove lingering AP IP if still on interface */
+                        struct in_addr ap_old_addr;
+                        if (net_addr_pton(AF_INET, ESPIRATE_DEFAULT_IP, &ap_old_addr) == 0) {
+                            net_if_ipv4_addr_rm(s_iface, &ap_old_addr);
+                        }
                         struct in_addr mdns_mcast;
                         net_addr_pton(AF_INET, "224.0.0.251", &mdns_mcast);
                         int igmp_ret = net_ipv4_igmp_join(s_iface, &mdns_mcast, NULL);
@@ -689,9 +699,17 @@ static int stop_ap_mode(void)
         s_dhcp_srv_active = false;
     }
 
-    struct in_addr addr;
-    net_addr_pton(AF_INET, s_ap_ip, &addr);
-    net_if_ipv4_addr_rm(s_iface, &addr);
+    /* Clean up and mark overridable any AP unicast addresses on interface */
+    if (s_iface && s_iface->config.ip.ipv4) {
+        for (int i = 0; i < NET_IF_MAX_IPV4_ADDR; i++) {
+            if (s_iface->config.ip.ipv4->unicast[i].ipv4.is_used) {
+                s_iface->config.ip.ipv4->unicast[i].ipv4.addr_type = NET_ADDR_OVERRIDABLE;
+                net_if_ipv4_addr_rm(s_iface, &s_iface->config.ip.ipv4->unicast[i].ipv4.address.in_addr);
+            }
+        }
+        struct in_addr zero_gw = {0};
+        net_if_ipv4_set_gw(s_iface, &zero_gw);
+    }
 
     int ret = net_mgmt(NET_REQUEST_WIFI_AP_DISABLE, s_iface, NULL, 0);
     s_ap_active = false;
@@ -757,6 +775,19 @@ static int start_sta_mode(void)
     LOG_INF("  Security    : %s (%s)", wifi_security_txt(s_sta_security), s_sta_sec_str);
     LOG_INF("  Band/Channel: 2.4 GHz, ANY (All-channel scan)");
     LOG_INF("  MFP (802.11w): OPTIONAL (Capable & Required per WPA3)");
+
+    /* Ensure clean slate for station interface */
+    net_dhcpv4_stop(s_iface);
+    if (s_iface && s_iface->config.ip.ipv4) {
+        for (int i = 0; i < NET_IF_MAX_IPV4_ADDR; i++) {
+            if (s_iface->config.ip.ipv4->unicast[i].ipv4.is_used) {
+                s_iface->config.ip.ipv4->unicast[i].ipv4.addr_type = NET_ADDR_OVERRIDABLE;
+                net_if_ipv4_addr_rm(s_iface, &s_iface->config.ip.ipv4->unicast[i].ipv4.address.in_addr);
+            }
+        }
+        struct in_addr zero_gw = {0};
+        net_if_ipv4_set_gw(s_iface, &zero_gw);
+    }
 
     /* Schedule watchdog for timeout */
     k_work_schedule(&s_sta_watchdog, K_SECONDS(STA_WATCHDOG_TIMEOUT_SEC));
@@ -881,8 +912,10 @@ int wifi_manager_set_mode(espirate_wifi_mode_t mode, bool save)
         }
         if (s_ap_active) {
             stop_ap_mode();
+            k_msleep(100);
         } else {
             stop_sta_mode();
+            k_msleep(100);
         }
         int ret = start_sta_mode();
         if (ret == 0 && save) {
@@ -1045,8 +1078,8 @@ bool wifi_manager_sta_is_connected(void)
 
 bool wifi_manager_has_saved_sta(void)
 {
-    struct fs_dirent entry;
-    return (fs_stat(WIFI_STA_FILE, &entry) == 0);
+    char ssid[33] = {0};
+    return (load_credentials_safely(ssid, sizeof(ssid), NULL, 0, NULL, 0) == 0 && strlen(ssid) > 0);
 }
 
 const char *wifi_manager_get_sta_ssid(void)
