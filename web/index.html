@@ -279,15 +279,19 @@ async function switchWifiMode(mode) {
     if (res.ok) {
       log('run-console', '[Wi-Fi] Mode switch request submitted: ' + mode.toUpperCase());
       if (mode === 'ap') {
+        document.getElementById('mode-badge').innerText = 'Mode: AP (Starting...)';
+        document.getElementById('active-mode-display').innerText = 'AP';
+        document.getElementById('btn-mode-ap').style.background = '#0284c7';
+        document.getElementById('btn-mode-sta').style.background = '#334155';
         const apSsid = (document.getElementById('ap-info') ? document.getElementById('ap-info').innerText.replace('AP: ', '') : '') || 'ESPirate';
         alert('Switched to Soft-AP Mode!\n\nESPirate is now broadcasting Wi-Fi network "' + apSsid + '".\n\nTo access ESPirate:\n1. Connect your Wi-Fi to "' + apSsid + '"\n2. Open http://192.168.4.1 (or wait for the captive portal notification).');
       } else {
-        const staSsid = document.getElementById('wifi-sta-ssid').value.trim() || 'your configured network';
-        alert('Switched to Station (STA) Mode!\n\nESPirate is now disconnecting its Soft-AP and connecting to "' + staSsid + '".\n\nTo access ESPirate:\n1. Reconnect your device to "' + staSsid + '"\n2. Open http://espirate-cea0.local (or ESPirate\'s DHCP IP on your network).');
         document.getElementById('mode-badge').innerText = 'Mode: STA (Connecting...)';
         document.getElementById('active-mode-display').innerText = 'STA';
         document.getElementById('btn-mode-sta').style.background = '#0284c7';
         document.getElementById('btn-mode-ap').style.background = '#334155';
+        const staSsid = document.getElementById('wifi-sta-ssid').value.trim() || 'your configured network';
+        alert('Switched to Station (STA) Mode!\n\nESPirate is now disconnecting its Soft-AP and connecting to "' + staSsid + '".\n\nTo access ESPirate:\n1. Reconnect your device to "' + staSsid + '"\n2. Open http://espirate-cea0.local (or ESPirate\'s DHCP IP on your network).');
         setTimeout(fetchWifi, 3000);
       }
     } else {
@@ -302,8 +306,16 @@ async function switchWifiMode(mode) {
     }
   } catch (err) {
     if (mode === 'ap') {
+      document.getElementById('mode-badge').innerText = 'Mode: AP (Starting...)';
+      document.getElementById('active-mode-display').innerText = 'AP';
+      document.getElementById('btn-mode-ap').style.background = '#0284c7';
+      document.getElementById('btn-mode-sta').style.background = '#334155';
       alert('Mode switch to AP initiated!\n\nESPirate has disconnected from this network to start its Soft-AP.\n\nConnect to the ESPirate Wi-Fi network and browse to http://192.168.4.1.');
     } else {
+      document.getElementById('mode-badge').innerText = 'Mode: STA (Connecting...)';
+      document.getElementById('active-mode-display').innerText = 'STA';
+      document.getElementById('btn-mode-sta').style.background = '#0284c7';
+      document.getElementById('btn-mode-ap').style.background = '#334155';
       const staSsid = document.getElementById('wifi-sta-ssid').value.trim() || 'your configured network';
       alert('Mode switch to Station initiated!\n\nESPirate is shutting down its Soft-AP to connect to "' + staSsid + '".\n\nReconnect your device to "' + staSsid + '" and open http://espirate-cea0.local.');
     }
@@ -398,11 +410,11 @@ async function saveAndConnectWifi() {
     document.getElementById('wifi-sta-pass').value = '';
     if (res.ok) {
       log('run-console', '[Wi-Fi] Credentials saved and connection initiated.');
-      alert('Connecting to Station "' + ssid + '"!\n\nESPirate has saved credentials and is connecting to "' + ssid + '".\n\nTo access ESPirate:\n1. Reconnect your device to "' + ssid + '"\n2. Open http://espirate-cea0.local (or ESPirate\'s DHCP IP on your network).');
       document.getElementById('mode-badge').innerText = 'Mode: STA (Connecting...)';
       document.getElementById('active-mode-display').innerText = 'STA';
       document.getElementById('btn-mode-sta').style.background = '#0284c7';
       document.getElementById('btn-mode-ap').style.background = '#334155';
+      alert('Connecting to Station "' + ssid + '"!\n\nESPirate has saved credentials and is connecting to "' + ssid + '".\n\nTo access ESPirate:\n1. Reconnect your device to "' + ssid + '"\n2. Open http://espirate-cea0.local (or ESPirate\'s DHCP IP on your network).');
       setTimeout(fetchWifi, 3000);
     } else {
       const txt = await res.text();
@@ -410,6 +422,10 @@ async function saveAndConnectWifi() {
       alert('Connection error: ' + txt);
     }
   } catch (err) {
+    document.getElementById('mode-badge').innerText = 'Mode: STA (Connecting...)';
+    document.getElementById('active-mode-display').innerText = 'STA';
+    document.getElementById('btn-mode-sta').style.background = '#0284c7';
+    document.getElementById('btn-mode-ap').style.background = '#334155';
     alert('Connection initiated!\n\nESPirate is switching to Station mode to connect to "' + ssid + '".\n\nReconnect your device to "' + ssid + '" and open http://espirate-cea0.local.');
   }
 }

@@ -452,9 +452,7 @@ static void wifi_mgmt_event_handler(struct net_mgmt_event_callback *cb,
     case NET_EVENT_WIFI_AP_ENABLE_RESULT:
         LOG_INF("Wi-Fi Soft-AP '%s' enabled and broadcasting.", s_ap_ssid);
         s_ap_active = true;
-        if (!s_dhcp_srv_active) {
-            start_dhcpv4_server();
-        }
+        start_dhcpv4_server();
         break;
 
     case NET_EVENT_WIFI_AP_DISABLE_RESULT:
@@ -473,6 +471,7 @@ static void wifi_mgmt_event_handler(struct net_mgmt_event_callback *cb,
         } else {
             LOG_INF("AP Station joined (clients: %u)", s_sta_clients);
         }
+        start_dhcpv4_server();
         break;
     }
 
@@ -682,10 +681,16 @@ static void ipv4_mgmt_event_handler(struct net_mgmt_event_callback *cb,
     }
 }
 
+extern void net_arp_clear_cache(struct net_if *iface);
+
 static int start_dhcpv4_server(void)
 {
     if (!s_iface) {
         return -ENODEV;
+    }
+
+    if (s_dhcp_srv_active) {
+        return 0;
     }
 
     struct in_addr addr;
@@ -709,13 +714,18 @@ static int start_dhcpv4_server(void)
     pool_start.s4_addr[3] = 10;
 
     int ret = net_dhcpv4_server_start(s_iface, &pool_start);
-    if (ret != 0 && ret != -EALREADY) {
+    if (ret == -EALREADY) {
+        s_dhcp_srv_active = true;
+        return 0;
+    }
+    if (ret != 0) {
         LOG_ERR("DHCPv4 server failed to start: %d", ret);
         return ret;
     }
 
+    net_arp_clear_cache(s_iface);
     s_dhcp_srv_active = true;
-    LOG_INF("DHCPv4 server active at %s (Router/DNS: %s, Pool: .10 - .50)",
+    LOG_INF("DHCPv4 server active at %s (Router/DNS: %s, Pool: .10 - .41)",
             s_ap_ip, s_ap_ip);
     return 0;
 }
@@ -728,6 +738,12 @@ static int start_ap_mode(void)
     }
 
     LOG_INF("Starting Soft-AP Mode '%s'...", s_ap_ssid);
+
+    /* Clean up any lingering DHCPv4 server before reconfiguring addresses */
+    if (s_dhcp_srv_active) {
+        net_dhcpv4_server_stop(s_iface);
+        s_dhcp_srv_active = false;
+    }
 
     /* Clean up any existing unicast addresses before assigning AP IP */
     if (s_iface && s_iface->config.ip.ipv4) {
@@ -761,6 +777,7 @@ static int start_ap_mode(void)
 
     s_active_mode = ESPIRATE_WIFI_MODE_AP;
     s_ap_active = true;
+    start_dhcpv4_server();
     captive_dns_set_enabled(true);
 
     struct in_addr ap_ip_addr;
@@ -779,16 +796,20 @@ static int stop_ap_mode(void)
 
     LOG_INF("Stopping Soft-AP Mode '%s'...", s_ap_ssid);
 
+    /* Stop DHCP server immediately so its socket is unregistered before carrier/link drops */
+    if (s_dhcp_srv_active) {
+        net_dhcpv4_server_stop(s_iface);
+        s_dhcp_srv_active = false;
+    }
+
     /* Send goodbye packet with TTL=0 to purge 192.168.4.1 from peer mDNS caches */
     struct in_addr old_ap_ip;
     if (net_addr_pton(AF_INET, s_ap_ip, &old_ap_ip) == 0) {
         send_mdns_announcement(s_hostname, &old_ap_ip, 0);
     }
 
-    if (s_dhcp_srv_active) {
-        net_dhcpv4_server_stop(s_iface);
-        s_dhcp_srv_active = false;
-    }
+    /* Deauthenticate connected AP stations at 802.11 MAC level */
+    esp_wifi_deauth_sta(0);
 
     /* Clean up and mark overridable any AP unicast addresses on interface */
     if (s_iface && s_iface->config.ip.ipv4) {
@@ -909,6 +930,7 @@ static int stop_sta_mode(void)
 
     LOG_INF("Stopping Station Mode...");
     net_dhcpv4_stop(s_iface);
+
     int ret = net_mgmt(NET_REQUEST_WIFI_DISCONNECT, s_iface, NULL, 0);
 
     /* Explicitly stop ESP32 Wi-Fi driver so AP mode can start cleanly */
@@ -921,6 +943,8 @@ static int stop_sta_mode(void)
                 net_if_ipv4_addr_rm(s_iface, &s_iface->config.ip.ipv4->unicast[i].ipv4.address.in_addr);
             }
         }
+        struct in_addr zero_gw = {0};
+        net_if_ipv4_set_gw(s_iface, &zero_gw);
     }
 
     return ret;

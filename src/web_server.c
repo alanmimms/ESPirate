@@ -33,6 +33,14 @@ static struct k_thread web_server_thread_data;
 static bool s_running = false;
 static int s_server_fd = -1;
 
+void web_server_notify_network_change(void)
+{
+    /* Listening socket is bound to INADDR_ANY (0.0.0.0:80) and accepts
+     * incoming TCP connections on any active network interface (AP or STA).
+     * No teardown or recreation is necessary or desirable on IP change.
+     */
+}
+
 static void handle_api_status(int sock);
 
 static void send_http_response(int sock, int status_code, const char *content_type,
@@ -1093,56 +1101,77 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
     /* Delay to allow Wi-Fi interface initialization */
     k_sleep(K_MSEC(1000));
 
-    int server_fd = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (server_fd < 0) {
-        LOG_ERR("Failed to create TCP socket: %d", errno);
-        return;
-    }
-    s_server_fd = server_fd;
-
-    int opt = 1;
-    zsock_setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    struct sockaddr_in bind_addr = {
-        .sin_family = AF_INET,
-        .sin_port = htons(WEB_SERVER_PORT),
-        .sin_addr.s_addr = htonl(INADDR_ANY),
-    };
-
-    if (zsock_bind(server_fd, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
-        LOG_ERR("Failed to bind socket to port %d: %d", WEB_SERVER_PORT, errno);
-        zsock_close(server_fd);
-        return;
-    }
-
-    if (zsock_listen(server_fd, 5) < 0) {
-        LOG_ERR("Failed to listen on socket: %d", errno);
-        zsock_close(server_fd);
-        return;
-    }
-
-    s_running = true;
-    LOG_INF("ESPirate Web Server active on port %d (http://%s)", WEB_SERVER_PORT, wifi_manager_get_ip());
-
     static char req_buf[REQ_BUF_SIZE];
 
     while (1) {
-        struct sockaddr_in client_addr;
-        socklen_t client_addr_len = sizeof(client_addr);
-        int client_fd = zsock_accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
-        if (client_fd < 0) {
-            k_msleep(50);
+        int server_fd = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (server_fd < 0) {
+            LOG_ERR("Failed to create TCP socket: %d", errno);
+            k_sleep(K_MSEC(1000));
             continue;
         }
 
+        int opt = 1;
+        zsock_setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        struct sockaddr_in bind_addr = {
+            .sin_family = AF_INET,
+            .sin_port = htons(WEB_SERVER_PORT),
+            .sin_addr.s_addr = htonl(INADDR_ANY),
+        };
+
+        if (zsock_bind(server_fd, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
+            LOG_ERR("Failed to bind socket to port %d: %d", WEB_SERVER_PORT, errno);
+            zsock_close(server_fd);
+            k_sleep(K_MSEC(1000));
+            continue;
+        }
+
+        if (zsock_listen(server_fd, 16) < 0) {
+            LOG_ERR("Failed to listen on socket: %d", errno);
+            zsock_close(server_fd);
+            k_sleep(K_MSEC(1000));
+            continue;
+        }
+
+        s_server_fd = server_fd;
+        s_running = true;
+        LOG_INF("ESPirate Web Server active on port %d (http://%s)", WEB_SERVER_PORT, wifi_manager_get_ip());
+
+        while (1) {
+
+            struct zsock_pollfd pfd = {
+                .fd = server_fd,
+                .events = ZSOCK_POLLIN,
+            };
+            int poll_ret = zsock_poll(&pfd, 1, 1000);
+            if (poll_ret < 0) {
+                LOG_DBG("Server socket poll error %d (errno %d)", poll_ret, errno);
+                break;
+            }
+            if (poll_ret == 0) {
+                continue;
+            }
+
+            struct sockaddr_in client_addr;
+            socklen_t client_addr_len = sizeof(client_addr);
+            int client_fd = zsock_accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
+            if (client_fd < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                    continue;
+                }
+                LOG_DBG("zsock_accept failed: %d", errno);
+                break;
+            }
+
         /* Wait up to 1500ms for incoming data. If client socket is an idle browser pre-connect,
          * close it immediately so we do not stall the single-threaded server. */
-        struct zsock_pollfd pfd = {
+        struct zsock_pollfd client_pfd = {
             .fd = client_fd,
             .events = ZSOCK_POLLIN,
         };
-        int poll_ret = zsock_poll(&pfd, 1, 1500);
-        if (poll_ret <= 0) {
+        int client_poll_ret = zsock_poll(&client_pfd, 1, 1500);
+        if (client_poll_ret <= 0) {
             zsock_close(client_fd);
             continue;
         }
@@ -1381,6 +1410,11 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
         }
 
         zsock_close(client_fd);
+    }
+
+        s_server_fd = -1;
+        zsock_close(server_fd);
+        k_sleep(K_MSEC(1000));
     }
 }
 
