@@ -140,7 +140,7 @@ textarea { height: 160px; resize: vertical; }
         <button class="danger" onclick="forgetWifi()">Forget STA</button>
       </div>
       <div class="toggle-row">
-        <span>Pretend Internet Connectivity (Android 17 / 204 Probe)</span>
+        <span>Pretend Internet Connectivity (Suppresses Captive Portal)</span>
         <input type="checkbox" id="fake-internet-toggle" onchange="toggleFakeInternet(this.checked)" style="width:auto; margin:0; cursor:pointer;">
       </div>
     </div>
@@ -270,18 +270,31 @@ async function fetchTelemetry() {
 
 async function switchWifiMode(mode) {
   log('run-console', '[Wi-Fi] Switching mode to ' + mode.toUpperCase() + '...');
-  const res = await fetch('/api/wifi/mode', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode: mode })
-  });
-  if (res.ok) {
-    log('run-console', '[Wi-Fi] Mode switch request submitted: ' + mode.toUpperCase());
-    setTimeout(fetchWifi, 1500);
-  } else {
-    const txt = await res.text();
-    log('run-console', '[Wi-Fi] Switch error: ' + txt);
-    alert('Mode switch failed: ' + txt);
+  try {
+    const res = await fetch('/api/wifi/mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: mode })
+    });
+    if (res.ok) {
+      log('run-console', '[Wi-Fi] Mode switch request submitted: ' + mode.toUpperCase());
+      if (mode === 'ap') {
+        const apSsid = (document.getElementById('ap-info') ? document.getElementById('ap-info').innerText.replace('AP: ', '') : '') || 'ESPirate';
+        alert('Switched to Soft-AP Mode!\n\nESPirate is now broadcasting Wi-Fi network "' + apSsid + '".\n\nTo access ESPirate:\n1. Connect your Wi-Fi to "' + apSsid + '"\n2. Open http://192.168.4.1 (or wait for the captive portal notification).');
+      } else {
+        setTimeout(fetchWifi, 2000);
+      }
+    } else {
+      const txt = await res.text();
+      log('run-console', '[Wi-Fi] Switch error: ' + txt);
+      alert('Mode switch failed: ' + txt);
+    }
+  } catch (err) {
+    if (mode === 'ap') {
+      alert('Mode switch to AP initiated!\n\nESPirate has disconnected from this network to start its Soft-AP.\n\nConnect to the ESPirate Wi-Fi network and browse to http://192.168.4.1.');
+    } else {
+      alert('Switch error: ' + err);
+    }
   }
 }
 

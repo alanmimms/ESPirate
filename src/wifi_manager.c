@@ -90,7 +90,7 @@ static char s_sta_pass[65] = {0};
 static char s_sta_sec_str[16] = "wpa2";
 static enum wifi_security_type s_sta_security = WIFI_SECURITY_TYPE_PSK;
 static char s_sta_ip[16] = "0.0.0.0";
-static bool s_fake_internet = true;
+static bool s_fake_internet = false;
 
 static bool s_scan_in_progress = false;
 static uint32_t s_scan_count = 0;
@@ -270,22 +270,20 @@ static void load_fake_internet_flag(void)
 {
     struct fs_dirent entry;
     if (fs_stat(FAKE_INTERNET_FILE, &entry) != 0) {
-        s_fake_internet = true;
-        captive_dns_set_enabled(true);
+        s_fake_internet = false;
         return;
     }
 
     struct fs_file_t file;
     fs_file_t_init(&file);
     if (fs_open(&file, FAKE_INTERNET_FILE, FS_O_READ) == 0) {
-        char val = '1';
+        char val = '0';
         fs_read(&file, &val, 1);
         fs_close(&file);
-        s_fake_internet = (val != '0');
+        s_fake_internet = (val == '1');
     } else {
-        s_fake_internet = true;
+        s_fake_internet = false;
     }
-    captive_dns_set_enabled(s_fake_internet);
 }
 
 static void save_fake_internet_flag(bool enable)
@@ -673,7 +671,7 @@ static int start_ap_mode(void)
 
     s_active_mode = ESPIRATE_WIFI_MODE_AP;
     s_ap_active = true;
-    captive_dns_set_enabled(s_fake_internet);
+    captive_dns_set_enabled(true);
 
     return 0;
 }
@@ -870,6 +868,7 @@ int wifi_manager_set_mode(espirate_wifi_mode_t mode, bool save)
 
     if (mode == ESPIRATE_WIFI_MODE_AP) {
         stop_sta_mode();
+        k_msleep(100);
         int ret = start_ap_mode();
         if (ret == 0 && save) {
             save_configured_mode(ESPIRATE_WIFI_MODE_AP);

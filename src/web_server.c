@@ -76,6 +76,19 @@ static void send_http_response(int sock, int status_code, const char *content_ty
     }
 }
 
+static void send_http_redirect(int sock, const char *location)
+{
+    char hdr[256];
+    int hdr_len = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.1 302 Found\r\n"
+        "Location: %s\r\n"
+        "Content-Length: 0\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Connection: close\r\n\r\n",
+        location);
+    zsock_send(sock, hdr, hdr_len, 0);
+}
+
 static void handle_api_status(int sock)
 {
     char json[512];
@@ -261,11 +274,11 @@ static void handle_api_wifi_mode(int sock, const char *body)
             return;
         }
         send_http_response(sock, 200, "application/json", "{\"status\":\"switching_to_sta\"}", 30);
-        k_msleep(50);
+        k_msleep(300);
         wifi_manager_set_mode(ESPIRATE_WIFI_MODE_STA, true);
     } else if (strcasecmp(mode, "ap") == 0) {
         send_http_response(sock, 200, "application/json", "{\"status\":\"switching_to_ap\"}", 29);
-        k_msleep(50);
+        k_msleep(300);
         wifi_manager_set_mode(ESPIRATE_WIFI_MODE_AP, true);
     } else {
         send_http_response(sock, 400, "application/json", "{\"error\":\"Invalid mode\"}", 24);
@@ -405,6 +418,7 @@ static int handle_serve_fs_file(int sock, const char *full_path, const char *con
         if (sent < read_bytes) {
             break;
         }
+        k_yield();
     }
 
     fs_close(&file);
@@ -1121,20 +1135,20 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
             continue;
         }
 
-        /* Wait up to 300ms for incoming data. If client socket is an idle browser pre-connect,
+        /* Wait up to 1500ms for incoming data. If client socket is an idle browser pre-connect,
          * close it immediately so we do not stall the single-threaded server. */
         struct zsock_pollfd pfd = {
             .fd = client_fd,
             .events = ZSOCK_POLLIN,
         };
-        int poll_ret = zsock_poll(&pfd, 1, 300);
+        int poll_ret = zsock_poll(&pfd, 1, 1500);
         if (poll_ret <= 0) {
             zsock_close(client_fd);
             continue;
         }
 
         struct timeval tv = {
-            .tv_sec = 2,
+            .tv_sec = 3,
             .tv_usec = 0,
         };
         zsock_setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -1169,6 +1183,16 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
             char path[128] = {0};
             sscanf(req_buf, "%7s %127s", method, path);
 
+            /* Extract Host header for captive portal redirection */
+            char host[64] = {0};
+            char *h = strstr(req_buf, "Host:");
+            if (!h) h = strstr(req_buf, "host:");
+            if (h) {
+                sscanf(h + 5, "%63s", host);
+                char *colon = strchr(host, ':');
+                if (colon) *colon = '\0';
+            }
+
             /* Normalize absolute URI (e.g. "http://192.168.0.56/path" -> "/path") */
             char *req_path = path;
             if (strncmp(req_path, "http://", 7) == 0) {
@@ -1189,9 +1213,9 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
             }
 
             if (strcmp(method, "GET") == 0) {
-                LOG_DBG("HTTP GET %s", clean_path);
+                LOG_DBG("HTTP GET %s (Host: %s)", clean_path, host);
             } else {
-                LOG_INF("HTTP %s %s", method, clean_path);
+                LOG_INF("HTTP %s %s (Host: %s)", method, clean_path, host);
             }
 
             /* Locate HTTP body (after \r\n\r\n) */
@@ -1203,10 +1227,45 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
             }
 
             if (strcmp(method, "GET") == 0) {
-                /* Android 17 / Chrome 204 Probe */
-                if (strcmp(clean_path, "/generate_204") == 0 || strcmp(clean_path, "/gen_204") == 0 ||
-                    strstr(clean_path, "generate_204") != NULL || strstr(clean_path, "gen_204") != NULL) {
+                bool is_ap = (wifi_manager_get_active_mode() == ESPIRATE_WIFI_MODE_AP);
+                bool fake_net = wifi_manager_get_fake_internet();
+
+                /* Captive Portal redirect: in AP mode without fake_internet, redirect OS probes to AP root */
+                if (is_ap && !fake_net &&
+                    (strcmp(clean_path, "/generate_204") == 0 || strcmp(clean_path, "/gen_204") == 0 ||
+                     strstr(clean_path, "generate_204") != NULL || strstr(clean_path, "gen_204") != NULL ||
+                     strcmp(clean_path, "/hotspot-detect.html") == 0 || strcmp(clean_path, "/library/test/success.html") == 0 ||
+                     strcmp(clean_path, "/ncsi.txt") == 0 || strcmp(clean_path, "/connecttest.txt") == 0 ||
+                     strcmp(clean_path, "/canonical.html") == 0 || strcmp(clean_path, "/success.txt") == 0)) {
+                    send_http_redirect(client_fd, "http://192.168.4.1/");
+                }
+                /* Foreign host catch-all redirect (e.g. user opens http://google.com or http://neverssl.com) */
+                else if (is_ap && !fake_net && host[0] != '\0' &&
+                         strcmp(host, "192.168.4.1") != 0 &&
+                         strstr(host, "espirate") == NULL &&
+                         strstr(clean_path, ".png") == NULL &&
+                         strstr(clean_path, ".ico") == NULL &&
+                         strstr(clean_path, ".css") == NULL &&
+                         strstr(clean_path, ".js") == NULL &&
+                         strncmp(clean_path, "/api/", 5) != 0) {
+                    send_http_redirect(client_fd, "http://192.168.4.1/");
+                }
+                /* Fake internet probes (if user explicitly enabled pretend internet) */
+                else if (fake_net && (strcmp(clean_path, "/generate_204") == 0 || strcmp(clean_path, "/gen_204") == 0 ||
+                                      strstr(clean_path, "generate_204") != NULL || strstr(clean_path, "gen_204") != NULL)) {
                     send_http_response(client_fd, 204, "text/plain", NULL, 0);
+                }
+                else if (fake_net && strcmp(clean_path, "/ncsi.txt") == 0) {
+                    send_http_response(client_fd, 200, "text/plain", "Microsoft NCSI", 14);
+                }
+                else if (fake_net && strcmp(clean_path, "/connecttest.txt") == 0) {
+                    send_http_response(client_fd, 200, "text/plain", "Microsoft Connect Test", 22);
+                }
+                else if (fake_net && (strcmp(clean_path, "/hotspot-detect.html") == 0 ||
+                                      strcmp(clean_path, "/library/test/success.html") == 0) &&
+                         !wifi_manager_sta_is_connected()) {
+                    const char apple_ok[] = "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>";
+                    send_http_response(client_fd, 200, "text/html", apple_ok, sizeof(apple_ok) - 1);
                 }
                 /* Favicon handling: serve /favicon.png or /favicon.ico from LittleFS if present, else 204 */
                 else if (strcmp(clean_path, "/favicon.ico") == 0 || strcmp(clean_path, "/favicon.png") == 0) {
@@ -1223,19 +1282,6 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
                             send_http_response(client_fd, 204, "image/x-icon", NULL, 0);
                         }
                     }
-                }
-                /* Microsoft NCSI Probes */
-                else if (strcmp(clean_path, "/ncsi.txt") == 0) {
-                    send_http_response(client_fd, 200, "text/plain", "Microsoft NCSI", 14);
-                } else if (strcmp(clean_path, "/connecttest.txt") == 0) {
-                    send_http_response(client_fd, 200, "text/plain", "Microsoft Connect Test", 22);
-                }
-                /* Apple Captive Portal Detection (only in AP mode with fake internet enabled) */
-                else if ((strcmp(clean_path, "/hotspot-detect.html") == 0 ||
-                          strcmp(clean_path, "/library/test/success.html") == 0) &&
-                         !wifi_manager_sta_is_connected() && wifi_manager_get_fake_internet()) {
-                    const char apple_ok[] = "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>";
-                    send_http_response(client_fd, 200, "text/html", apple_ok, sizeof(apple_ok) - 1);
                 }
                 /* Dashboard & API endpoints */
                 else if (strcmp(clean_path, "/") == 0 || strcmp(clean_path, "/index.html") == 0 ||
