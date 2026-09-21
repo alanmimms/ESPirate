@@ -12,6 +12,7 @@
 #include <zephyr/net/dhcpv4.h>
 #include <zephyr/net/hostname.h>
 #include <zephyr/net/igmp.h>
+#include <zephyr/net/socket.h>
 #include <zephyr/fs/fs.h>
 #include <esp_mac.h>
 #include <esp_wifi.h>
@@ -560,6 +561,79 @@ static void wifi_mgmt_event_handler(struct net_mgmt_event_callback *cb,
     }
 }
 
+static void send_mdns_announcement(const char *hostname, struct in_addr *ip, uint32_t ttl)
+{
+    if (!hostname || !ip || strlen(hostname) == 0) {
+        return;
+    }
+
+    int sock = zsock_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        return;
+    }
+
+    uint8_t pkt[128];
+    uint8_t *p = pkt;
+
+    /* DNS Header */
+    *p++ = 0x00; *p++ = 0x00; /* ID = 0 */
+    *p++ = 0x84; *p++ = 0x00; /* Flags: Response (0x80), Authoritative (0x04) */
+    *p++ = 0x00; *p++ = 0x00; /* QDCOUNT = 0 */
+    *p++ = 0x00; *p++ = 0x01; /* ANCOUNT = 1 */
+    *p++ = 0x00; *p++ = 0x00; /* NSCOUNT = 0 */
+    *p++ = 0x00; *p++ = 0x00; /* ARCOUNT = 0 */
+
+    /* Answer Name: <hostname>.local */
+    size_t hlen = strlen(hostname);
+    if (hlen > 63) hlen = 63;
+    *p++ = (uint8_t)hlen;
+    memcpy(p, hostname, hlen);
+    p += hlen;
+
+    *p++ = 0x05; /* length of "local" */
+    memcpy(p, "local", 5);
+    p += 5;
+    *p++ = 0x00; /* null terminator */
+
+    /* Type A (0x0001) */
+    *p++ = 0x00; *p++ = 0x01;
+
+    /* Class IN (0x0001) | Cache-Flush bit (0x8000) = 0x8001 */
+    *p++ = 0x80; *p++ = 0x01;
+
+    /* TTL (4 bytes, big-endian) */
+    *p++ = (uint8_t)((ttl >> 24) & 0xFF);
+    *p++ = (uint8_t)((ttl >> 16) & 0xFF);
+    *p++ = (uint8_t)((ttl >> 8) & 0xFF);
+    *p++ = (uint8_t)(ttl & 0xFF);
+
+    /* RDLENGTH = 4 */
+    *p++ = 0x00; *p++ = 0x04;
+
+    /* RDATA (IPv4 Address bytes) */
+    memcpy(p, &ip->s_addr, 4);
+    p += 4;
+
+    size_t pkt_len = p - pkt;
+
+    struct sockaddr_in dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.sin_family = AF_INET;
+    dest.sin_port = htons(5353);
+    net_addr_pton(AF_INET, "224.0.0.251", &dest.sin_addr);
+
+    /* Send two consecutive announcements separated by 50ms per RFC 6762 */
+    zsock_sendto(sock, pkt, pkt_len, 0, (struct sockaddr *)&dest, sizeof(dest));
+    k_msleep(50);
+    zsock_sendto(sock, pkt, pkt_len, 0, (struct sockaddr *)&dest, sizeof(dest));
+
+    zsock_close(sock);
+    char ip_str[NET_IPV4_ADDR_LEN] = {0};
+    net_addr_ntop(AF_INET, ip, ip_str, sizeof(ip_str));
+    LOG_INF("Sent mDNS announcement: %s.local -> %s (TTL=%u, cache-flush)",
+            hostname, ip_str, ttl);
+}
+
 static void ipv4_mgmt_event_handler(struct net_mgmt_event_callback *cb,
                                     uint64_t mgmt_event,
                                     struct net_if *iface)
@@ -594,6 +668,12 @@ static void ipv4_mgmt_event_handler(struct net_mgmt_event_callback *cb,
                         net_addr_pton(AF_INET, "224.0.0.251", &mdns_mcast);
                         int igmp_ret = net_ipv4_igmp_join(s_iface, &mdns_mcast, NULL);
                         LOG_INF("Joined mDNS multicast group 224.0.0.251 (ret=%d)", igmp_ret);
+
+                        /* Send unsolicited mDNS announcement with cache-flush bit to update all peers */
+                        struct in_addr sta_ip_addr;
+                        if (net_addr_pton(AF_INET, s_sta_ip, &sta_ip_addr) == 0) {
+                            send_mdns_announcement(s_hostname, &sta_ip_addr, 15);
+                        }
                         break;
                     }
                 }
@@ -683,6 +763,11 @@ static int start_ap_mode(void)
     s_ap_active = true;
     captive_dns_set_enabled(true);
 
+    struct in_addr ap_ip_addr;
+    if (net_addr_pton(AF_INET, s_ap_ip, &ap_ip_addr) == 0) {
+        send_mdns_announcement(s_hostname, &ap_ip_addr, 15);
+    }
+
     return 0;
 }
 
@@ -693,6 +778,12 @@ static int stop_ap_mode(void)
     }
 
     LOG_INF("Stopping Soft-AP Mode '%s'...", s_ap_ssid);
+
+    /* Send goodbye packet with TTL=0 to purge 192.168.4.1 from peer mDNS caches */
+    struct in_addr old_ap_ip;
+    if (net_addr_pton(AF_INET, s_ap_ip, &old_ap_ip) == 0) {
+        send_mdns_announcement(s_hostname, &old_ap_ip, 0);
+    }
 
     if (s_dhcp_srv_active) {
         net_dhcpv4_server_stop(s_iface);
