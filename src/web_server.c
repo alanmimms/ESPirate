@@ -334,6 +334,178 @@ static void handle_api_scripts_list(int sock)
     send_http_response(sock, 200, "application/json", resp, pos);
 }
 
+static const char *get_mime_type(const char *path)
+{
+    if (!path) return "application/octet-stream";
+    if (strstr(path, ".html") || strstr(path, ".htm")) return "text/html; charset=utf-8";
+    if (strstr(path, ".css")) return "text/css";
+    if (strstr(path, ".js")) return "application/javascript";
+    if (strstr(path, ".json")) return "application/json";
+    if (strstr(path, ".md")) return "text/markdown; charset=utf-8";
+    if (strstr(path, ".lua")) return "text/x-lua";
+    if (strstr(path, ".ico")) return "image/x-icon";
+    if (strstr(path, ".png")) return "image/png";
+    if (strstr(path, ".jpg") || strstr(path, ".jpeg")) return "image/jpeg";
+    if (strstr(path, ".svg")) return "image/svg+xml";
+    if (strstr(path, ".txt")) return "text/plain; charset=utf-8";
+    return "text/plain";
+}
+
+static int handle_serve_fs_file(int sock, const char *full_path, const char *content_type, bool send_404_on_fail)
+{
+    struct fs_dirent entry;
+    int rc = fs_stat(full_path, &entry);
+    if (rc != 0 || entry.type != FS_DIR_ENTRY_FILE) {
+        if (send_404_on_fail) {
+            send_http_response(sock, 404, "text/plain", "File not found", 14);
+        }
+        return (rc != 0) ? rc : -ENOENT;
+    }
+
+    struct fs_file_t file;
+    fs_file_t_init(&file);
+    rc = fs_open(&file, full_path, FS_O_READ);
+    if (rc != 0) {
+        if (send_404_on_fail) {
+            send_http_response(sock, 500, "text/plain", "Failed to open file", 19);
+        }
+        return rc;
+    }
+
+    char hdr[256];
+    int hdr_len = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %zu\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Connection: close\r\n\r\n",
+        content_type ? content_type : get_mime_type(full_path),
+        entry.size);
+
+    ssize_t sret = zsock_send(sock, hdr, hdr_len, 0);
+    if (sret <= 0) {
+        fs_close(&file);
+        return -EIO;
+    }
+
+    char chunk[1024];
+    while (1) {
+        ssize_t read_bytes = fs_read(&file, chunk, sizeof(chunk));
+        if (read_bytes <= 0) {
+            break;
+        }
+        ssize_t sent = 0;
+        while (sent < read_bytes) {
+            ssize_t r = zsock_send(sock, chunk + sent, read_bytes - sent, 0);
+            if (r <= 0) {
+                break;
+            }
+            sent += r;
+        }
+        if (sent < read_bytes) {
+            break;
+        }
+    }
+
+    fs_close(&file);
+    return 0;
+}
+
+static void handle_serve_dashboard(int sock)
+{
+    /* Try serving from LittleFS (/lfs/index.html) first */
+    int ret = handle_serve_fs_file(sock, ESPIRATE_FS_MOUNT_POINT "/index.html", "text/html; charset=utf-8", false);
+    if (ret != 0) {
+        /* Fallback to compiled-in ROM firmware dashboard */
+        send_http_response(sock, 200, "text/html",
+                           ESPIRATE_DASHBOARD_HTML, sizeof(ESPIRATE_DASHBOARD_HTML) - 1);
+    }
+}
+
+static void handle_api_upload(int sock, const char *path, const char *req_buf, size_t received_len)
+{
+    const char *name_param = strstr(path, "name=");
+    if (!name_param) {
+        name_param = strstr(path, "path=");
+    }
+    if (!name_param) {
+        send_http_response(sock, 400, "text/plain", "Missing name or path parameter", 30);
+        return;
+    }
+    if (strncmp(name_param, "name=", 5) == 0) name_param += 5;
+    else if (strncmp(name_param, "path=", 5) == 0) name_param += 5;
+
+    char filename[128] = {0};
+    size_t i = 0;
+    while (*name_param && *name_param != '&' && i < sizeof(filename) - 1) {
+        filename[i++] = *name_param++;
+    }
+
+    char full_path[160];
+    if (filename[0] == '/') {
+        strncpy(full_path, filename, sizeof(full_path) - 1);
+    } else {
+        snprintf(full_path, sizeof(full_path), "%s/%s", ESPIRATE_FS_MOUNT_POINT, filename);
+    }
+    full_path[sizeof(full_path) - 1] = '\0';
+
+    /* Find Content-Length */
+    char *cl = strstr(req_buf, "Content-Length:");
+    if (!cl) cl = strstr(req_buf, "content-length:");
+    size_t content_len = 0;
+    if (cl) {
+        content_len = (size_t)strtoul(cl + 15, NULL, 10);
+    }
+
+    /* Locate start of body */
+    char *body_start = strstr(req_buf, "\r\n\r\n");
+    if (!body_start) {
+        send_http_response(sock, 400, "text/plain", "Invalid HTTP headers", 20);
+        return;
+    }
+    body_start += 4;
+    size_t header_len = body_start - req_buf;
+    size_t initial_body_bytes = (received_len > header_len) ? (received_len - header_len) : 0;
+    if (content_len > 0 && initial_body_bytes > content_len) {
+        initial_body_bytes = content_len;
+    }
+
+    struct fs_file_t file;
+    fs_file_t_init(&file);
+    int rc = fs_open(&file, full_path, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
+    if (rc != 0) {
+        send_http_response(sock, 500, "text/plain", "Failed to open file for writing", 31);
+        return;
+    }
+
+    size_t total_written = 0;
+    if (initial_body_bytes > 0) {
+        ssize_t w = fs_write(&file, body_start, initial_body_bytes);
+        if (w > 0) total_written += w;
+    }
+
+    /* Stream remaining body chunks from socket directly into LittleFS */
+    char chunk[1024];
+    while (total_written < content_len) {
+        size_t to_read = sizeof(chunk);
+        if (content_len - total_written < to_read) {
+            to_read = content_len - total_written;
+        }
+        ssize_t r = zsock_recv(sock, chunk, to_read, 0);
+        if (r <= 0) break;
+        ssize_t w = fs_write(&file, chunk, r);
+        if (w > 0) total_written += w;
+        if (w < r) break;
+    }
+
+    fs_close(&file);
+
+    char resp[128];
+    int rlen = snprintf(resp, sizeof(resp), "{\"status\":\"uploaded\",\"file\":\"%s\",\"bytes\":%zu}",
+                        filename, total_written);
+    send_http_response(sock, 200, "application/json", resp, rlen);
+}
+
 static void handle_api_get_script(int sock, const char *path)
 {
     const char *name_param = strstr(path, "name=");
@@ -355,17 +527,16 @@ static void handle_api_get_script(int sock, const char *path)
     } else {
         snprintf(full_path, sizeof(full_path), "%s/%s", ESPIRATE_FS_MOUNT_POINT, filename);
     }
+    full_path[sizeof(full_path) - 1] = '\0';
 
-    static char buf[3072];
-    size_t bytes_read = 0;
-    int rc = fs_manager_read_file(full_path, buf, sizeof(buf) - 1, &bytes_read);
-    if (rc != 0) {
-        send_http_response(sock, 404, "text/plain", "Script not found", 16);
-        return;
+    const char *ct = "text/plain";
+    if (strstr(filename, ".md") != NULL) {
+        ct = "text/markdown; charset=utf-8";
+    } else if (strstr(filename, ".lua") != NULL) {
+        ct = "text/x-lua";
     }
-    buf[bytes_read] = '\0';
 
-    send_http_response(sock, 200, "text/plain", buf, bytes_read);
+    handle_serve_fs_file(sock, full_path, ct, true);
 }
 
 static void handle_api_save_script(int sock, const char *body)
@@ -1037,9 +1208,21 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
                     strstr(clean_path, "generate_204") != NULL || strstr(clean_path, "gen_204") != NULL) {
                     send_http_response(client_fd, 204, "text/plain", NULL, 0);
                 }
-                /* Favicon - 204 No Content for instant response */
-                else if (strcmp(clean_path, "/favicon.ico") == 0) {
-                    send_http_response(client_fd, 204, "image/x-icon", NULL, 0);
+                /* Favicon handling: serve /favicon.png or /favicon.ico from LittleFS if present, else 204 */
+                else if (strcmp(clean_path, "/favicon.ico") == 0 || strcmp(clean_path, "/favicon.png") == 0) {
+                    char fs_path[160];
+                    snprintf(fs_path, sizeof(fs_path), "%s%s", ESPIRATE_FS_MOUNT_POINT, clean_path);
+                    if (handle_serve_fs_file(client_fd, fs_path, NULL, false) != 0) {
+                        /* Fallback: if /favicon.ico was requested, try /favicon.png */
+                        if (strcmp(clean_path, "/favicon.ico") == 0) {
+                            snprintf(fs_path, sizeof(fs_path), "%s/favicon.png", ESPIRATE_FS_MOUNT_POINT);
+                            if (handle_serve_fs_file(client_fd, fs_path, "image/png", false) != 0) {
+                                send_http_response(client_fd, 204, "image/x-icon", NULL, 0);
+                            }
+                        } else {
+                            send_http_response(client_fd, 204, "image/x-icon", NULL, 0);
+                        }
+                    }
                 }
                 /* Microsoft NCSI Probes */
                 else if (strcmp(clean_path, "/ncsi.txt") == 0) {
@@ -1055,9 +1238,9 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
                     send_http_response(client_fd, 200, "text/html", apple_ok, sizeof(apple_ok) - 1);
                 }
                 /* Dashboard & API endpoints */
-                else if (strcmp(clean_path, "/") == 0 || strcmp(clean_path, "/index.html") == 0) {
-                    send_http_response(client_fd, 200, "text/html",
-                                       ESPIRATE_DASHBOARD_HTML, sizeof(ESPIRATE_DASHBOARD_HTML) - 1);
+                else if (strcmp(clean_path, "/") == 0 || strcmp(clean_path, "/index.html") == 0 ||
+                         strcmp(clean_path, "/help") == 0 || strcmp(clean_path, "/docs") == 0) {
+                    handle_serve_dashboard(client_fd);
                 } else if (strcmp(clean_path, "/api/wifi") == 0) {
                     handle_api_wifi_get(client_fd);
                 } else if (strcmp(clean_path, "/api/status") == 0) {
@@ -1079,12 +1262,19 @@ static void web_server_thread_fn(void *arg1, void *arg2, void *arg3)
                 } else if (strncmp(clean_path, "/api/script", 11) == 0) {
                     handle_api_get_script(client_fd, req_path);
                 } else {
-                    /* All other GET requests serve the dashboard so the user always sees the web page */
-                    send_http_response(client_fd, 200, "text/html",
-                                       ESPIRATE_DASHBOARD_HTML, sizeof(ESPIRATE_DASHBOARD_HTML) - 1);
+                    /* Check if the requested file exists in LittleFS (e.g. /howto.md, /style.css, /demo.lua) */
+                    char fs_path[160];
+                    snprintf(fs_path, sizeof(fs_path), "%s%s", ESPIRATE_FS_MOUNT_POINT, clean_path);
+                    if (handle_serve_fs_file(client_fd, fs_path, NULL, false) != 0) {
+                        /* Not a static file in LittleFS: serve dashboard for SPA routing */
+                        handle_serve_dashboard(client_fd);
+                    }
                 }
             } else if (strcmp(method, "POST") == 0) {
-                if (strcmp(clean_path, "/api/wifi") == 0) {
+                if (strncmp(clean_path, "/api/upload", 11) == 0 ||
+                    strncmp(clean_path, "/api/file/upload", 16) == 0) {
+                    handle_api_upload(client_fd, req_path, req_buf, received);
+                } else if (strcmp(clean_path, "/api/wifi") == 0) {
                     handle_api_wifi_post(client_fd, body);
                 } else if (strcmp(clean_path, "/api/wifi/mode") == 0) {
                     handle_api_wifi_mode(client_fd, body);

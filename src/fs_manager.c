@@ -12,6 +12,9 @@
 #include <string.h>
 
 #include "fs_manager.h"
+#include "howto_doc.h"
+#include "web_dashboard.h"
+#include "favicon_image.h"
 
 LOG_MODULE_REGISTER(fs_manager, LOG_LEVEL_INF);
 
@@ -48,6 +51,66 @@ static void normalize_path(const char *in, char *out, size_t out_size)
     out[out_size - 1] = '\0';
 }
 
+int fs_manager_restore_docs(void)
+{
+    if (!is_mounted) {
+        return -ENODEV;
+    }
+    int rc = fs_manager_write_file(ESPIRATE_FS_MOUNT_POINT "/howto.md",
+                                   ESPIRATE_HOWTO_MD, ESPIRATE_HOWTO_MD_LEN);
+    if (rc == 0) {
+        LOG_INF("Restored /lfs/howto.md (%zu bytes) from firmware image", (size_t)ESPIRATE_HOWTO_MD_LEN);
+    } else {
+        LOG_ERR("Failed to restore /lfs/howto.md: %d", rc);
+    }
+    return rc;
+}
+
+int fs_manager_restore_web(void)
+{
+    if (!is_mounted) {
+        return -ENODEV;
+    }
+    int rc = fs_manager_write_file(ESPIRATE_FS_MOUNT_POINT "/index.html",
+                                   ESPIRATE_DASHBOARD_HTML, ESPIRATE_DASHBOARD_HTML_LEN);
+    if (rc == 0) {
+        LOG_INF("Restored /lfs/index.html (%zu bytes) from firmware image", (size_t)ESPIRATE_DASHBOARD_HTML_LEN);
+    } else {
+        LOG_ERR("Failed to restore /lfs/index.html: %d", rc);
+    }
+    return rc;
+}
+
+int fs_manager_restore_favicon(void)
+{
+    if (!is_mounted) {
+        return -ENODEV;
+    }
+    int rc = fs_manager_write_file(ESPIRATE_FS_MOUNT_POINT "/favicon.png",
+                                   ESPIRATE_FAVICON_PNG, ESPIRATE_FAVICON_PNG_LEN);
+    if (rc == 0) {
+        LOG_INF("Restored /lfs/favicon.png (%zu bytes) from firmware image", (size_t)ESPIRATE_FAVICON_PNG_LEN);
+    } else {
+        LOG_ERR("Failed to restore /lfs/favicon.png: %d", rc);
+    }
+    return rc;
+}
+
+int fs_manager_restore_all(void)
+{
+    if (!is_mounted) {
+        return -ENODEV;
+    }
+    int ret = 0;
+    int rc = fs_manager_restore_docs();
+    if (rc != 0) ret = rc;
+    rc = fs_manager_restore_web();
+    if (rc != 0) ret = rc;
+    rc = fs_manager_restore_favicon();
+    if (rc != 0) ret = rc;
+    return ret;
+}
+
 void fs_manager_create_default_files(void)
 {
     if (!is_mounted) {
@@ -71,6 +134,24 @@ void fs_manager_create_default_files(void)
             "print('========================================')\n";
         fs_manager_write_file(ESPIRATE_FS_MOUNT_POINT "/demo.lua", demo_code, strlen(demo_code));
         LOG_INF("Created default /lfs/demo.lua");
+    }
+
+    /* Write default howto.md documentation if it doesn't exist or size differs */
+    if (fs_stat(ESPIRATE_FS_MOUNT_POINT "/howto.md", &dirent) != 0 ||
+        dirent.size != (size_t)ESPIRATE_HOWTO_MD_LEN) {
+        fs_manager_restore_docs();
+    }
+
+    /* Write default index.html dashboard if it doesn't exist or size differs */
+    if (fs_stat(ESPIRATE_FS_MOUNT_POINT "/index.html", &dirent) != 0 ||
+        dirent.size != (size_t)ESPIRATE_DASHBOARD_HTML_LEN) {
+        fs_manager_restore_web();
+    }
+
+    /* Write default favicon.png if it doesn't exist or size differs */
+    if (fs_stat(ESPIRATE_FS_MOUNT_POINT "/favicon.png", &dirent) != 0 ||
+        dirent.size != (size_t)ESPIRATE_FAVICON_PNG_LEN) {
+        fs_manager_restore_favicon();
     }
 }
 

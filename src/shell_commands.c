@@ -494,6 +494,66 @@ static int cmd_storage_format(const struct shell *sh, size_t argc, char **argv)
     return rc;
 }
 
+static int cmd_storage_restore_docs(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    shell_print(sh, "Restoring /lfs/howto.md from firmware documentation image...");
+    int rc = fs_manager_restore_docs();
+    if (rc == 0) {
+        shell_print(sh, "Successfully restored /lfs/howto.md.");
+    } else {
+        shell_error(sh, "Failed to restore /lfs/howto.md: %d", rc);
+    }
+    return rc;
+}
+
+static int cmd_storage_restore_web(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    shell_print(sh, "Restoring /lfs/index.html from firmware dashboard image...");
+    int rc = fs_manager_restore_web();
+    if (rc == 0) {
+        shell_print(sh, "Successfully restored /lfs/index.html.");
+    } else {
+        shell_error(sh, "Failed to restore /lfs/index.html: %d", rc);
+    }
+    return rc;
+}
+
+static int cmd_storage_restore_favicon(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    shell_print(sh, "Restoring /lfs/favicon.png from firmware favicon image...");
+    int rc = fs_manager_restore_favicon();
+    if (rc == 0) {
+        shell_print(sh, "Successfully restored /lfs/favicon.png.");
+    } else {
+        shell_error(sh, "Failed to restore /lfs/favicon.png: %d", rc);
+    }
+    return rc;
+}
+
+static int cmd_storage_restore_all(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    shell_print(sh, "Restoring all default files (demo.lua, howto.md, index.html, favicon.png) from firmware...");
+    int rc = fs_manager_restore_all();
+    if (rc == 0) {
+        shell_print(sh, "Successfully restored all default files.");
+    } else {
+        shell_error(sh, "Failed to restore all files: %d", rc);
+    }
+    return rc;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_storage,
     SHELL_CMD(status, NULL, "Show storage statistics: storage status", cmd_storage_status),
     SHELL_CMD(ls, NULL, "List files in LittleFS: storage ls", cmd_storage_ls),
@@ -501,6 +561,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_storage,
     SHELL_CMD(rm, NULL, "Delete file: storage rm <filename>", cmd_storage_rm),
     SHELL_CMD(rename, NULL, "Rename file: storage rename <old> <new>", cmd_storage_rename),
     SHELL_CMD(format, NULL, "Reformat LittleFS: storage format", cmd_storage_format),
+    SHELL_CMD(restore_docs, NULL, "Restore howto.md from firmware: storage restore_docs", cmd_storage_restore_docs),
+    SHELL_CMD(restore_web, NULL, "Restore index.html from firmware: storage restore_web", cmd_storage_restore_web),
+    SHELL_CMD(restore_favicon, NULL, "Restore favicon.png from firmware: storage restore_favicon", cmd_storage_restore_favicon),
+    SHELL_CMD(restore_all, NULL, "Restore all default files from firmware: storage restore_all", cmd_storage_restore_all),
     SHELL_SUBCMD_SET_END
 );
 

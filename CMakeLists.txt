@@ -28,6 +28,52 @@ add_custom_command(
 add_custom_target(generate_web_dashboard DEPENDS ${GEN_WEB_HEADER})
 add_dependencies(app generate_web_dashboard)
 
+# How-To Guide Documentation Generator: converts doc/howto.md -> howto_doc.h
+set(DOC_HOWTO_FILE ${CMAKE_CURRENT_SOURCE_DIR}/doc/howto.md)
+set(GEN_DOC_HEADER ${CMAKE_CURRENT_BINARY_DIR}/include/howto_doc.h)
+set(GEN_DOC_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/scripts/generate_doc_header.py)
+
+# Generate at CMake configure time if not already present or out of date
+execute_process(
+  COMMAND ${PYTHON_EXECUTABLE} ${GEN_DOC_SCRIPT} ${DOC_HOWTO_FILE} ${GEN_DOC_HEADER}
+)
+
+# Custom command to regenerate during build whenever doc/howto.md or the generator changes
+add_custom_command(
+  OUTPUT ${GEN_DOC_HEADER}
+  COMMAND ${PYTHON_EXECUTABLE} ${GEN_DOC_SCRIPT} ${DOC_HOWTO_FILE} ${GEN_DOC_HEADER}
+  DEPENDS ${DOC_HOWTO_FILE} ${GEN_DOC_SCRIPT}
+  COMMENT "Generating howto_doc.h from ${DOC_HOWTO_FILE}"
+  VERBATIM
+)
+
+# Custom target ensuring header is generated before any target compiles
+add_custom_target(generate_doc_header DEPENDS ${GEN_DOC_HEADER})
+add_dependencies(app generate_doc_header)
+
+# Favicon Image Generator: converts web/favicon.png -> favicon_image.h
+set(WEB_FAVICON_FILE ${CMAKE_CURRENT_SOURCE_DIR}/web/favicon.png)
+set(GEN_FAVICON_HEADER ${CMAKE_CURRENT_BINARY_DIR}/include/favicon_image.h)
+set(GEN_FAVICON_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/scripts/generate_favicon_header.py)
+
+# Generate at CMake configure time if not already present or out of date
+execute_process(
+  COMMAND ${PYTHON_EXECUTABLE} ${GEN_FAVICON_SCRIPT} ${WEB_FAVICON_FILE} ${GEN_FAVICON_HEADER}
+)
+
+# Custom command to regenerate during build whenever web/favicon.png or the generator changes
+add_custom_command(
+  OUTPUT ${GEN_FAVICON_HEADER}
+  COMMAND ${PYTHON_EXECUTABLE} ${GEN_FAVICON_SCRIPT} ${WEB_FAVICON_FILE} ${GEN_FAVICON_HEADER}
+  DEPENDS ${WEB_FAVICON_FILE} ${GEN_FAVICON_SCRIPT}
+  COMMENT "Generating favicon_image.h from ${WEB_FAVICON_FILE}"
+  VERBATIM
+)
+
+# Custom target ensuring header is generated before any target compiles
+add_custom_target(generate_favicon_header DEPENDS ${GEN_FAVICON_HEADER})
+add_dependencies(app generate_favicon_header)
+
 # Include directories
 target_include_directories(app PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -89,6 +135,7 @@ target_sources(app PRIVATE
   src/posix_stubs.c
   src/setjmp.S
   ${GEN_WEB_HEADER}
+  ${GEN_DOC_HEADER}
   ${LUA_SOURCES}
 )
 

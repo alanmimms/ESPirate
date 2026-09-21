@@ -91,9 +91,33 @@ int fs_manager_rename_file(const char *old_path, const char *new_path);
 int fs_manager_list_files(fs_file_info_t *files, size_t max_files, size_t *count);
 
 /**
- * @brief Ensure default system files exist (e.g. /lfs/demo.lua).
+ * @brief Ensure default system files exist (e.g. /lfs/demo.lua and /lfs/howto.md).
  */
 void fs_manager_create_default_files(void);
+
+/**
+ * @brief Force restore /lfs/howto.md from compiled-in firmware documentation.
+ * @return 0 on success, negative error code on failure.
+ */
+int fs_manager_restore_docs(void);
+
+/**
+ * @brief Force restore /lfs/index.html from compiled-in firmware dashboard.
+ * @return 0 on success, negative error code on failure.
+ */
+int fs_manager_restore_web(void);
+
+/**
+ * @brief Force restore /lfs/favicon.png from compiled-in firmware image.
+ * @return 0 on success, negative error code on failure.
+ */
+int fs_manager_restore_favicon(void);
+
+/**
+ * @brief Force restore all default files (demo.lua, howto.md, index.html, favicon.png).
+ * @return 0 on success, negative error code on failure.
+ */
+int fs_manager_restore_all(void);
 
 /**
  * @brief Get detected physical SPI flash chip size in bytes.
